@@ -117,6 +117,8 @@ class OpBufferQueue:
         self._queue = deque()
         self._num_per_split = defaultdict(int)
         self._lock = threading.Lock()
+        # Used to buffer output RefBundles indexed by output splits.
+        self._outputs_by_split = defaultdict(deque)
         super().__init__()
 
     @property
@@ -134,9 +136,13 @@ class OpBufferQueue:
     def __len__(self):
         return len(self._queue)
 
-    def next_ref_dataset_index(self) -> int:
-        assert self.has_next()
-        return self._queue[0].get_subdataset_index()
+    def next_ref_dataset_index(self, output_split_idx: Optional[int] = None) -> int:
+        assert self.has_next(output_split_idx)
+        if output_split_idx is None:
+            return self._queue[0].get_subdataset_index()
+        else:
+            with self._lock:
+                return self._outputs_by_split[0].get_subdataset_index()
 
     def has_next(self, output_split_idx: Optional[int] = None) -> bool:
         """Whether next RefBundle is available.

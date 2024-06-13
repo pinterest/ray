@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Set, Union
 
 import ray
+import sys
 from ray import ObjectRef
 from ray._raylet import ObjectRefGenerator
 from ray.data._internal.compute import (
@@ -280,11 +281,14 @@ class MapOperator(OneToOneOperator, ABC):
 
     def _flush_buffer_to_output_queue(self, task_index):
         # for each cur_dataset_index, if no pending previous task, flush to output
+        min_pending_index = sys.maxsize
+        for subdataset_index in sorted(self.subdataset_index_to_pending_task_count.keys()):
+            if len(self.subdataset_index_to_pending_task_count[subdataset_index]) > 0:
+                min_pending_index = subdataset_index
+                break
         for subdataset_index in sorted(self.next_subdataset_save_Dict.keys()):
             if len(self.next_subdataset_save_Dict[subdataset_index]) > 0 \
-                and (subdataset_index == 0 \
-                    or self.subdataset_index_to_pending_task_count[subdataset_index - 1] is None \
-                    or self.subdataset_index_to_pending_task_count[subdataset_index - 1] == 0):
+                and subdataset_index <= min_pending_index:
 
                 for output in self.next_subdataset_save_Dict[subdataset_index]:
                     self._output_queue.notify_task_output_ready(task_index, output)

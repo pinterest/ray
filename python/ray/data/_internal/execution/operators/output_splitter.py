@@ -180,7 +180,12 @@ class OutputSplitter(PhysicalOperator):
     def _pop_bundle_to_dispatch(self, target_index: int) -> RefBundle:
         if self._locality_hints:
             preferred_loc = self._locality_hints[target_index]
+            cur_dataset_index = self._buffer[0].get_subdataset_index()
             for bundle in self._buffer:
+                assert bundle.get_subdataset_index() >= cur_dataset_index
+                # ensure the output is only increasing
+                if bundle.get_subdataset_index() > cur_dataset_index:
+                    break
                 if self._get_location(bundle) == preferred_loc:
                     self._buffer.remove(bundle)
                     return bundle
@@ -253,9 +258,9 @@ def _split(bundle: RefBundle, left_size: int) -> (RefBundle, RefBundle):
             right_blocks.append(rb)
             acc += lm.num_rows
             assert acc == left_size
-    left = RefBundle(list(zip(left_blocks, left_meta)), owns_blocks=bundle.owns_blocks)
+    left = RefBundle(list(zip(left_blocks, left_meta)), owns_blocks=bundle.owns_blocks, subdataset_index=bundle.get_subdataset_index())
     right = RefBundle(
-        list(zip(right_blocks, right_meta)), owns_blocks=bundle.owns_blocks
+        list(zip(right_blocks, right_meta)), owns_blocks=bundle.owns_blocks, subdataset_index=bundle.get_subdataset_index()
     )
     assert left.num_rows() == left_size
     assert left.num_rows() + right.num_rows() == bundle.num_rows()

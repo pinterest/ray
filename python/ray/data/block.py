@@ -204,6 +204,16 @@ class BlockMetadata:
     #: Execution stats for this block.
     exec_stats: Optional[BlockExecStats]
 
+    subdataset_index: Optional[int]
+
+    def get_subdataset_index(self) -> int:
+        assert self.subdataset_index is not None
+        return self.subdataset_index
+
+    def set_subdataset_index(self, subdataset_index: int) -> None:
+        assert self.subdataset_index is None
+        self.subdataset_index = subdataset_index
+
     def __post_init__(self):
         if self.input_files is None:
             self.input_files = []

@@ -224,6 +224,8 @@ class SplitCoordinator:
                 next_bundle = self._output_iterator.get_next(output_split_idx)
 
             block = next_bundle.blocks[-1]
+            # assign subdataset_index
+            block[1].set_subdataset_index(next_bundle.get_subdataset_index())
             next_bundle = replace(next_bundle, blocks=next_bundle.blocks[:-1])
 
             # Accumulate any remaining blocks in next_bundle map as needed.

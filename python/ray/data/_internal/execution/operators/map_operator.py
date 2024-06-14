@@ -283,7 +283,7 @@ class MapOperator(OneToOneOperator, ABC):
         # for each cur_dataset_index, if no pending previous task, flush to output
         min_pending_index = sys.maxsize
         for subdataset_index in sorted(self.subdataset_index_to_pending_task_count.keys()):
-            if len(self.subdataset_index_to_pending_task_count[subdataset_index]) > 0:
+            if self.subdataset_index_to_pending_task_count[subdataset_index] > 0:
                 min_pending_index = subdataset_index
                 break
         for subdataset_index in sorted(self.next_subdataset_save_Dict.keys()):

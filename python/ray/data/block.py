@@ -204,7 +204,7 @@ class BlockMetadata:
     #: Execution stats for this block.
     exec_stats: Optional[BlockExecStats]
 
-    subdataset_index: Optional[int]
+    subdataset_index: Optional[int] = None
 
     def get_subdataset_index(self) -> int:
         assert self.subdataset_index is not None

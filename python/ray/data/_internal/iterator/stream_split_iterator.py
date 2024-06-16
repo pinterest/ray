@@ -70,6 +70,7 @@ class StreamSplitDataIterator(DataIterator):
         self._iter_stats = DatasetStats(stages={}, parent=None)
         self._cur_subdataset_index = cur_subdataset_index
         self._cached_next_subdataset_index_block: Optional[Tuple[ObjectRef[Block], BlockMetadata]] = None
+        self._cur_epoch = None
 
     def _to_block_iterator(
         self,
@@ -79,9 +80,10 @@ class StreamSplitDataIterator(DataIterator):
         bool,
     ]:
         def gen_blocks() -> Iterator[Tuple[ObjectRef[Block], BlockMetadata]]:
-            cur_epoch = ray.get(
-                self._coord_actor.start_epoch.remote(self._output_split_idx)
-            )
+            if self._cur_subdataset_index == 0:
+                self._cur_epoch = ray.get(
+                    self._coord_actor.start_epoch.remote(self._output_split_idx)
+                )
             if self._cached_next_subdataset_index_block is not None and self._cached_next_subdataset_index_block[1].get_subdataset_index() != self._cur_subdataset_index:
                 return
 
@@ -95,12 +97,13 @@ class StreamSplitDataIterator(DataIterator):
                 else:
                     future: ObjectRef[
                         Optional[ObjectRef[Block]]
-                    ] = self._coord_actor.get.remote(cur_epoch, self._output_split_idx)
+                    ] = self._coord_actor.get.remote(self._cur_epoch, self._output_split_idx)
                     while True:
                         block_ref: Optional[Tuple[ObjectRef[Block], BlockMetadata]] = ray.get(
                             future
                         )
                         if not block_ref:
+                            self._cur_epoch = None
                             return
                         elif block_ref[1].get_subdataset_index() != self._cur_subdataset_index:
                             assert block_ref[1].get_subdataset_index() > self._cur_subdataset_index
@@ -109,14 +112,17 @@ class StreamSplitDataIterator(DataIterator):
                             return
                         else:
                             future = self._coord_actor.get.remote(
-                                cur_epoch, self._output_split_idx
+                                self._cur_epoch, self._output_split_idx
                             )
                             yield block_ref
 
         return gen_blocks(), self._iter_stats, False
 
     def increase_subdataset_index_by_1(self) -> None:
-        self._cur_subdataset_index += 1
+        if self._cur_epoch is None:
+            self._cur_subdataset_index = 0
+        else:
+            self._cur_subdataset_index += 1
 
     def stats(self) -> str:
         """Implements DataIterator."""

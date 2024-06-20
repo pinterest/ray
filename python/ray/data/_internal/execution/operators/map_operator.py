@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Set, Union
 
 import ray
+import sys
 from ray import ObjectRef
 from ray._raylet import ObjectRefGenerator
 from ray.data._internal.compute import (
@@ -613,3 +614,94 @@ def _canonicalize_ray_remote_args(ray_remote_args: Dict[str, Any]) -> Dict[str, 
                 "It is not allowed to specify both num_cpus and num_gpus for map tasks."
             )
     return ray_remote_args
+
+
+class SubDatasetMapOperator(MapOperator):
+    def __init__(
+        self,
+        map_transformer: MapTransformer,
+        input_op: PhysicalOperator,
+        name: str,
+        target_max_block_size: Optional[int],
+        min_rows_per_bundle: Optional[int],
+        ray_remote_args: Optional[Dict[str, Any]],
+    ):
+        super().__init__(map_transformer, input_op, name, target_max_block_size, min_rows_per_bundle, ray_remote_args)
+        self.next_subdataset_save_Dict: Dict[int, List[RefBundle]] = defaultdict([])
+        self.subdataset_index_to_pending_task_count = dict(0)
+
+    def _flush_buffer_to_output_queue(self, task_index):
+        # for each cur_dataset_index, if no pending previous task, flush to output
+        min_pending_index = sys.maxsize
+        for subdataset_index in sorted(self.subdataset_index_to_pending_task_count.keys()):
+            if self.subdataset_index_to_pending_task_count[subdataset_index] > 0:
+                min_pending_index = subdataset_index
+                break
+        for subdataset_index in sorted(self.next_subdataset_save_Dict.keys()):
+            if len(self.next_subdataset_save_Dict[subdataset_index]) > 0 \
+                and subdataset_index <= min_pending_index:
+
+                for output in self.next_subdataset_save_Dict[subdataset_index]:
+                    self._output_queue.notify_task_output_ready(task_index, output)
+                del self.next_subdataset_save_Dict[subdataset_index]
+
+    def _submit_data_task(
+        self,
+        gen: ObjectRefGenerator,
+        inputs: RefBundle,
+        task_done_callback: Optional[Callable[[], None]] = None,
+    ):
+        """Submit a new data-handling task."""
+        # TODO(hchen):
+        # 1. Move this to the base PhyscialOperator class.
+        # 2. This method should only take a block-processing function as input,
+        #    instead of a streaming generator. The logic of submitting ray tasks
+        #    can also be capsulated in the base class.
+        task_index = self._next_data_task_idx
+        self._next_data_task_idx += 1
+        self._metrics.on_task_submitted(task_index, inputs)
+        cur_dataset_index = inputs.get_subdataset_index()
+
+        def _output_ready_callback(task_index, output: RefBundle):
+            # Since output is streamed, it should only contain one block.
+            assert len(output) == 1
+            self._metrics.on_output_generated(task_index, output)
+            output.set_subdataset_index(cur_dataset_index)
+
+            self.next_subdataset_save_Dict[cur_dataset_index].append(output)
+
+            self._flush_buffer_to_output_queue(task_index)
+
+        def _task_done_callback(task_index: int, exception: Optional[Exception]):
+            self._metrics.on_task_finished(task_index, exception)
+
+            # Estimate number of tasks from inputs received and tasks submitted so far
+            estimated_num_tasks = (
+                self.input_dependencies[0].num_outputs_total()
+                / self._metrics.num_inputs_received
+                * self._next_data_task_idx
+            )
+            self._estimated_output_blocks = round(
+                estimated_num_tasks
+                * self._metrics.num_outputs_of_finished_tasks
+                / self._metrics.num_tasks_finished
+            )
+
+            task = self._data_tasks.pop(task_index)
+            self.subdataset_index_to_pending_task_count[cur_dataset_index] = self.subdataset_index_to_pending_task_count[cur_dataset_index] - 1
+            assert self.subdataset_index_to_pending_task_count[cur_dataset_index] is not None and self.subdataset_index_to_pending_task_count[cur_dataset_index] >= 0
+            self._flush_buffer_to_output_queue(task_index)
+            self._finished_streaming_gens.append(task.get_waitable())
+            # Notify output queue that this task is complete.
+            self._output_queue.notify_task_completed(task_index)
+            if task_done_callback:
+                task_done_callback()
+
+        self.subdataset_index_to_pending_task_count[cur_dataset_index] = self.subdataset_index_to_pending_task_count.get(cur_dataset_index, 0) + 1
+        print(self.subdataset_index_to_pending_task_count)
+        self._data_tasks[task_index] = DataOpTask(
+            task_index,
+            gen,
+            lambda output: _output_ready_callback(task_index, output),
+            functools.partial(_task_done_callback, task_index),
+        )

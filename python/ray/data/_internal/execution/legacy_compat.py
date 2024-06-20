@@ -3,7 +3,7 @@
 It should be deleted once we fully move to the new executor backend.
 """
 
-from typing import Any, Iterator, Tuple
+from typing import Any, Iterator, Tuple, Optional
 
 import ray
 from ray.data._internal.block_list import BlockList
@@ -28,6 +28,7 @@ from ray.data._internal.lazy_block_list import LazyBlockList
 from ray.data._internal.logical.interfaces.logical_plan import LogicalPlan
 from ray.data._internal.logical.operators.read_operator import Read
 from ray.data._internal.logical.optimizers import get_execution_plan
+from ray.data._internal.subdataset_config import SubDatasetConfig
 from ray.data._internal.logical.rules.set_read_parallelism import (
     compute_additional_split_factor,
 )
@@ -69,6 +70,7 @@ def execute_to_legacy_bundle_iterator(
     allow_clear_input_blocks: bool,
     dataset_uuid: str,
     dag_rewrite=None,
+    subdataset_config: Optional[SubDatasetConfig] = None
 ) -> Iterator[RefBundle]:
     """Execute a plan with the new executor and return a bundle iterator.
 
@@ -89,6 +91,7 @@ def execute_to_legacy_bundle_iterator(
         plan,
         allow_clear_input_blocks,
         preserve_order=False,
+        subdataset_config=subdataset_config,
     )
     if dag_rewrite:
         dag = dag_rewrite(dag)
@@ -103,6 +106,7 @@ def execute_to_legacy_block_list(
     allow_clear_input_blocks: bool,
     dataset_uuid: str,
     preserve_order: bool,
+    subdataset_config: Optional[SubDatasetConfig] = None
 ) -> BlockList:
     """Execute a plan with the new executor and translate it into a legacy block list.
 
@@ -121,6 +125,7 @@ def execute_to_legacy_block_list(
         plan,
         allow_clear_input_blocks,
         preserve_order,
+        subdataset_config=subdataset_config,
     )
     bundles = executor.execute(dag, initial_stats=stats)
     block_list = _bundles_to_block_list(bundles)
@@ -183,6 +188,7 @@ def _get_execution_dag(
     plan: ExecutionPlan,
     allow_clear_input_blocks: bool,
     preserve_order: bool,
+    subdataset_config: Optional[SubDatasetConfig] = None
 ) -> Tuple[PhysicalOperator, DatasetStats]:
     """Get the physical operators DAG from a plan."""
     # Record usage of logical operators if available.
@@ -191,7 +197,7 @@ def _get_execution_dag(
 
     # Get DAG of physical operators and input statistics.
     if DataContext.get_current().optimizer_enabled:
-        dag = get_execution_plan(plan._logical_plan).dag
+        dag = get_execution_plan(plan._logical_plan, subdataset_config).dag
         stats = _get_initial_stats_from_plan(plan)
     else:
         dag, stats = _to_operator_dag(plan, allow_clear_input_blocks)

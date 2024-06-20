@@ -32,6 +32,7 @@ from ray.data._internal.execution.interfaces import TaskContext
 from ray.data._internal.lazy_block_list import LazyBlockList
 from ray.data._internal.logical.operators.input_data_operator import InputData
 from ray.data._internal.logical.operators.read_operator import Read
+from ray.data._internal.subdataset_config import SubDatasetConfig
 from ray.data._internal.logical.rules.operator_fusion import _are_remote_args_compatible
 from ray.data._internal.logical.rules.set_read_parallelism import (
     compute_additional_split_factor,
@@ -567,6 +568,7 @@ class ExecutionPlan:
         allow_clear_input_blocks: bool = True,
         force_read: bool = False,
         preserve_order: bool = False,
+        subdataset_config: Optional[SubDatasetConfig] = None
     ) -> BlockList:
         """Execute this plan.
 

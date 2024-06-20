@@ -1,7 +1,8 @@
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List, Callable
 
 from ray.data._internal.logical.operators.map_operator import AbstractMap
 from ray.data.datasource.datasource import Datasource, Reader
+from ray.data.datasource.datasource import ReadTask
 
 
 class Read(AbstractMap):
@@ -21,6 +22,14 @@ class Read(AbstractMap):
         self._parallelism = parallelism
         self._mem_size = mem_size
         self._detected_parallelism = None
+        self._assign_subdataset_index_func = None
+
+    def set_subdataset_index_assign_func(self, assign_subdataset_index_func: Callable[List[ReadTask], List[int]]):
+        assert self._assign_subdataset_index_func is None, "Reassign is not permitted"
+        self._assign_subdataset_index_func = assign_subdataset_index_func
+
+    def get_assign_subdataset_index_func(self) -> Optional[Callable[List[ReadTask], List[int]]]:
+        return self._assign_subdataset_index_func
 
     def set_detected_parallelism(self, parallelism: int):
         """

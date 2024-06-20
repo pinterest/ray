@@ -40,6 +40,16 @@ class RefBundle:
     # Cached location, used for get_cached_location().
     _cached_location: Optional[NodeIdStr] = None
 
+    subdataset_index: Optional[int] = None
+
+    def get_subdataset_index(self) -> int:
+        assert self.subdataset_index is not None, "subdataset_index for RefBundle is None"
+        return self.subdataset_index
+
+    def set_subdataset_index(self, subdataset_index) -> None:
+        assert self.subdataset_index is None, "subdataset_index should not be reassigned"
+        self.subdataset_index = subdataset_index
+
     def __post_init__(self):
         if not isinstance(self.blocks, tuple):
             object.__setattr__(self, "blocks", tuple(self.blocks))

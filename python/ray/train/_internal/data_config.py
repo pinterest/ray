@@ -6,6 +6,7 @@ from ray.actor import ActorHandle
 from ray.data import DataIterator, Dataset, ExecutionOptions, NodeIdStr
 from ray.data._internal.execution.interfaces.execution_options import ExecutionResources
 from ray.data.preprocessor import Preprocessor
+from ray.data._internal.subdataset_config import SubDatasetConfig
 
 # TODO(justinvyu): Fix the circular import error
 from ray.train.constants import TRAIN_DATASET_KEY  # noqa
@@ -24,6 +25,7 @@ class DataConfig:
         self,
         datasets_to_split: Union[Literal["all"], List[str]] = "all",
         execution_options: Optional[ExecutionOptions] = None,
+        subdataset_config: Optional[SubDatasetConfig] = None,
     ):
         """Construct a DataConfig.
 
@@ -47,6 +49,8 @@ class DataConfig:
         self._execution_options: ExecutionOptions = (
             execution_options or DataConfig.default_ingest_options()
         )
+
+        self._subdataset_config = subdataset_config
 
         self._num_train_cpus = 0.0
         self._num_train_gpus = 0.0

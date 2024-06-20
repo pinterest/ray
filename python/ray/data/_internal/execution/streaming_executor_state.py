@@ -361,8 +361,43 @@ class OpState:
             self._exception = exception
 
 
+class SubDatasetOpstate(OpState):
+    def __init__(self, op: PhysicalOperator, inqueues: List[OpBufferQueue]):
+        super().__init__(op, inqueues)
+        self.cur_subdataset_index = 0
+
+    def dispatch_next_task(self) -> None:
+        """Move a bundle from the operator inqueue to the operator itself."""
+        has_larger_subdataset_index = False
+        for i, inqueue in enumerate(self.inqueues):
+            if inqueue.has_next():
+                assert inqueue.next_ref_dataset_index() >= self.cur_subdataset_index, "The subdataset_index must be strictly increasing"
+            if inqueue.has_next() and inqueue.next_ref_dataset_index() == self.cur_subdataset_index:
+                ref = inqueue.pop()
+                if ref is not None:
+                    self.op.add_input(ref, input_index=i)
+                    return
+            elif inqueue.has_next() and inqueue.next_ref_dataset_index() > self.cur_subdataset_index:
+                has_larger_subdataset_index = True
+
+        while has_larger_subdataset_index:
+            self.cur_subdataset_index += 1
+            for i, inqueue in enumerate(self.inqueues):
+                if inqueue.has_next():
+                    assert inqueue.next_ref_dataset_index() >= self.cur_subdataset_index, "The subdataset_index must be strictly increasing"
+                if inqueue.has_next() and inqueue.next_ref_dataset_index() == self.cur_subdataset_index:
+                    ref = inqueue.pop()
+                    if ref is not None:
+                        self.op.add_input(ref, input_index=i)
+                        return
+                elif inqueue.has_next() and inqueue.next_ref_dataset_index() > self.cur_subdataset_index:
+                    has_larger_subdataset_index = True
+        assert False, "Nothing to dispatch"
+
+
 def build_streaming_topology(
-    dag: PhysicalOperator, options: ExecutionOptions
+    dag: PhysicalOperator, options: ExecutionOptions,
+    subdataset_config,
 ) -> Tuple[Topology, int]:
     """Instantiate the streaming operator state topology for the given DAG.
 
@@ -386,6 +421,8 @@ def build_streaming_topology(
         if op in topology:
             raise ValueError("An operator can only be present in a topology once.")
 
+        op_cls = OpState if subdataset_config is None else SubDatasetOpstate
+
         # Wire up the input outqueues to this op's inqueues.
         inqueues = []
         for i, parent in enumerate(op.input_dependencies):
@@ -393,7 +430,7 @@ def build_streaming_topology(
             inqueues.append(parent_state.outqueue)
 
         # Create state.
-        op_state = OpState(op, inqueues)
+        op_state = op_cls(op, inqueues)
         topology[op] = op_state
         op.start(options)
         return op_state

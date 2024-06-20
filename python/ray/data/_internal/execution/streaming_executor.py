@@ -97,7 +97,8 @@ class StreamingExecutor(Executor, threading.Thread):
         threading.Thread.__init__(self, daemon=True, name=thread_name)
 
     def execute(
-        self, dag: PhysicalOperator, initial_stats: Optional[DatasetStats] = None
+        self, dag: PhysicalOperator, initial_stats: Optional[DatasetStats] = None,
+        subdataset_config: Optional[SubDatasetConfig] = None,
     ) -> Iterator[RefBundle]:
         """Executes the DAG using a streaming execution strategy.
 
@@ -139,6 +140,7 @@ class StreamingExecutor(Executor, threading.Thread):
         class StreamIterator(OutputIterator):
             def __init__(self, outer: Executor):
                 self._outer = outer
+                self._previous_subdataset_index = None
 
             def get_next(self, output_split_idx: Optional[int] = None) -> RefBundle:
                 try:
@@ -147,10 +149,16 @@ class StreamingExecutor(Executor, threading.Thread):
                     )
                     if self._outer._global_info:
                         self._outer._global_info.update(1, dag._estimated_output_blocks)
+                    if subdataset_config is not None and self._previous_subdataset_index != item.get_subdataset_index()
+                        and self._previous_subdataset_index is not None:
+                        subdataset_config.on_subdataset_finished(self._previous_subdataset_index)
+                    self._previous_subdataset_index = item.get_subdataset_index
                     return item
                 # Needs to be BaseException to catch KeyboardInterrupt. Otherwise we
                 # can leave dangling progress bars by skipping shutdown.
                 except BaseException as e:
+                    if isinstance(e, StopIteration) and subdataset_config is not None:
+                        subdataset_config.on_subdataset_finished(self._previous_subdataset_index)
                     self._outer.shutdown(isinstance(e, StopIteration))
                     raise
 

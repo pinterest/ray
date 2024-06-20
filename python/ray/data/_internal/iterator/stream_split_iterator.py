@@ -17,6 +17,7 @@ from ray.data.iterator import DataIterator
 from ray.types import ObjectRef
 from ray.util.debug import log_once
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from ray.data._internal.subdataset_config import SubDatasetConfig
 
 if TYPE_CHECKING:
     import pyarrow
@@ -38,6 +39,7 @@ class StreamSplitDataIterator(DataIterator):
         n: int,
         equal: bool,
         locality_hints: Optional[List[NodeIdStr]],
+        subdataset_config: Optional[SubDatasetConfig] = None,
     ) -> List["StreamSplitDataIterator"]:
         """Create a split iterator from the given base Dataset and options.
 
@@ -49,7 +51,7 @@ class StreamSplitDataIterator(DataIterator):
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 ray.get_runtime_context().get_node_id(), soft=False
             ),
-        ).remote(base_dataset, n, equal, locality_hints)
+        ).remote(base_dataset, n, equal, locality_hints, subdataset_config)
 
         return [
             StreamSplitDataIterator(base_dataset, coord_actor, i, n) for i in range(n)
@@ -134,6 +136,7 @@ class SplitCoordinator:
         n: int,
         equal: bool,
         locality_hints: Optional[List[NodeIdStr]],
+        subdataset_config: Optional[SubDatasetConfig] = None,
     ):
         # Automatically set locality with output to the specified location hints.
         if locality_hints:
@@ -154,6 +157,7 @@ class SplitCoordinator:
         self._next_bundle: Dict[int, RefBundle] = {}
         self._unfinished_clients_in_epoch = n
         self._cur_epoch = -1
+        self._subdataset_config = subdataset_config
 
         def gen_epochs():
             while True:
@@ -174,6 +178,7 @@ class SplitCoordinator:
                     True,
                     dataset._plan._dataset_uuid,
                     dag_rewrite=add_split_op,
+                    subdataset_config=self._subdataset_config,
                 )
                 yield output_iterator
 

@@ -65,6 +65,7 @@ def plan_read_op(op: Read) -> PhysicalOperator:
         end = time.time()
         logger.info(f"Getting read tasks took: {end-start} seconds")
         _warn_on_high_parallelism(parallelism, len(read_tasks))
+        assign_subdataset_index_func = op.get_assign_subdataset_index_func()
 
         # Follow up on the comment below
         start = time.time()
@@ -87,6 +88,14 @@ def plan_read_op(op: Read) -> PhysicalOperator:
         ]
         end = time.time()
         logger.info(f"Generating reference bundle took: {end-start} seconds")
+        subdataset_indexes = None
+        if assign_subdataset_index_func is not None:
+            subdataset_indexes = assign_subdataset_index_func(read_tasks)
+
+        if subdataset_indexes is not None:
+            for ref_bundle, subdataset_index in zip(bundle, subdataset_indexes):
+                ref_bundle.set_subdataset_index(subdataset_index)
+
         return bundle
 
     inputs = InputDataBuffer(

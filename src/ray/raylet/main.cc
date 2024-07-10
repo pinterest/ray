@@ -311,7 +311,6 @@ int main(int argc, char *argv[]) {
             RayConfig::instance().raylet_report_resources_period_milliseconds();
         node_manager_config.record_metrics_period_ms =
             RayConfig::instance().metrics_report_interval_ms() / 2;
-
         node_manager_config.store_socket_name = store_socket_name;
         node_manager_config.temp_dir = temp_dir;
         node_manager_config.log_dir = log_dir;
@@ -327,9 +326,6 @@ int main(int argc, char *argv[]) {
         object_manager_config.object_manager_port = object_manager_port;
         object_manager_config.store_socket_name = store_socket_name;
 
-        object_manager_config.push_payload_compression_algorithm =
-            ray::ObjectManagerConfig::GetCompressionAlgorithm(
-                RayConfig::instance().object_manager_push_compression_algorithm());
         object_manager_config.timer_freq_ms =
             RayConfig::instance().object_manager_timer_freq_ms();
         object_manager_config.pull_timeout_ms =

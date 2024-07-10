@@ -285,6 +285,71 @@ class _StatsActor:
             tag_keys=iter_tag_keys,
         )
 
+        self.iter_total_s = Gauge(
+            "data_iter_total_seconds",
+            description="Total time spent in iteration",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_wait_s = Gauge(
+            "data_iter_wait_seconds",
+            description="Seconds spent in ray.wait()",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_get_s = Gauge(
+            "data_iter_get_seconds",
+            description="Seconds spent in ray.get()",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_next_batch_s = Gauge(
+            "data_iter_next_batch_seconds",
+            description="Seconds spent getting next batch", # Need a better description for this?
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_format_batch_s = Gauge(
+            "data_iter_format_batch_seconds",
+            description="Seconds spent formatting batch",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_collate_batch_s = Gauge(
+            "data_iter_collate_batch_seconds",
+            description="Seconds spent applying collate function to batch",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_finalize_batch_s = Gauge(
+            "data_iter_finalize_batch_seconds",
+            description="Seconds spent applying finalize function to batch",
+            tag_keys=iter_tag_keys,
+        )
+
+        self.iter_blocks_local = Gauge(
+            "data_iter_blocks_local",
+            description="Number of blocks in local node",
+            tag_keys=iter_tag_keys,
+        )
+        self.iter_blocks_remote = Gauge(
+            "data_iter_blocks_remote",
+            description="Number of blocks in remote nodes",
+            tag_keys=iter_tag_keys,
+        )
+
+        self.iter_blocks_unknown = Gauge(
+            "data_iter_blocks_unknown",
+            description="Number of blocks with unknown location",
+            tag_keys=iter_tag_keys,
+        )        
+
+        self.streaming_split_coordinator_s = Gauge(
+            "data_iter_streaming_split_coordinator_seconds",
+            description="Seconds spent in the coordinator actor to distribute blocks",
+            tag_keys=iter_tag_keys,
+        )
+
+        self.streaming_exec_schedule_s = Gauge(
+            "data_streaming_exec_schedule_seconds",
+            description="Seconds spent streaming executor scheduling",
+            tag_keys=iter_tag_keys,
+        )
+
         # === Dataset and Operator Metadata Metrics ===
         dataset_tags = ("dataset", "job_id", "start_time")
         self.data_dataset_estimated_total_blocks = Gauge(
@@ -465,6 +530,55 @@ class _StatsActor:
         self.iter_total_blocked_s.set(stats.iter_total_blocked_s.get(), tags)
         self.iter_user_s.set(stats.iter_user_s.get(), tags)
         self.iter_initialize_s.set(stats.iter_initialize_s.get(), tags)
+        self.iter_total_s.set(stats.iter_total_s.get(), tags)
+        self.iter_wait_s.set(stats.iter_wait_s.get(), tags)
+        self.iter_get_s.set(stats.iter_get_s.get(), tags)
+        self.iter_next_batch_s.set(stats.iter_next_batch_s.get(), tags)
+        self.iter_format_batch_s.set(stats.iter_format_batch_s.get(), tags)
+        self.iter_collate_batch_s.set(stats.iter_collate_batch_s.get(), tags)
+        self.iter_finalize_batch_s.set(stats.iter_finalize_batch_s.get(), tags)
+        self.streaming_split_coordinator_s.set(stats.streaming_split_coordinator_s.get(), tags)
+
+    def clear_execution_metrics(self, dataset_tag: str, operator_tags: List[str]):
+        for operator_tag in operator_tags:
+            tags = self._create_tags(dataset_tag, operator_tag)
+            self.spilled_bytes.set(0, tags)
+            self.allocated_bytes.set(0, tags)
+            self.freed_bytes.set(0, tags)
+            self.current_bytes.set(0, tags)
+            self.output_bytes.set(0, tags)
+            self.output_rows.set(0, tags)
+            self.cpu_usage_cores.set(0, tags)
+            self.gpu_usage_cores.set(0, tags)
+
+            for prom_metric in self.execution_metrics_inputs.values():
+                prom_metric.set(0, tags)
+
+            for prom_metric in self.execution_metrics_outputs.values():
+                prom_metric.set(0, tags)
+
+            for prom_metric in self.execution_metrics_tasks.values():
+                prom_metric.set(0, tags)
+
+            for prom_metric in self.execution_metrics_obj_store_memory.values():
+                prom_metric.set(0, tags)
+
+            for prom_metric in self.execution_metrics_misc.values():
+                prom_metric.set(0, tags)
+
+    def clear_iteration_metrics(self, dataset_tag: str):
+        tags = self._create_tags(dataset_tag)
+        self.iter_total_blocked_s.set(0, tags)
+        self.iter_user_s.set(0, tags)
+        self.iter_initialize_s.set(0, tags)
+        self.iter_total_s.set(0, tags)
+        self.iter_wait_s.set(0, tags)
+        self.iter_get_s.set(0, tags)
+        self.iter_next_batch_s.set(0, tags)
+        self.iter_format_batch_s.set(0, tags)
+        self.iter_collate_batch_s.set(0, tags)
+        self.iter_finalize_batch_s.set(0, tags)
+        self.streaming_split_coordinator_s.set(0, tags)
 
     def register_dataset(
         self,

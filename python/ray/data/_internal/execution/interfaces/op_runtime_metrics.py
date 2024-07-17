@@ -151,6 +151,14 @@ class OpRuntimeMetrics:
             "map_only": True,
         },
     )
+    average_bytes_task_outputs_generated: int = field(
+        default=0,
+        metadata={
+            "description": "The average size in bytes of outputs from this operator",
+            "metrics_group": "outputs",
+            "map_only": True,
+        },
+    )
 
     # === Tasks-related metrics ===
     num_tasks_submitted: int = field(
@@ -206,6 +214,30 @@ class OpRuntimeMetrics:
         metadata={
             "description": "Time spent in task submission backpressure.",
             "metrics_group": "tasks",
+        },
+    )
+    task_cpu_time: float = field(
+        default=0,
+        metadata={
+            "description": "Time actively using CPU within tasks",
+            "metrics_group": "tasks",
+            "map_only": True,
+        },
+    )
+    in_task_backpressure_time: float = field(
+        default=0,
+        metadata={
+            "description": "Time spent waiting idly on generator outputs to be yielded within tasks",
+            "metrics_group": "tasks",
+            "map_only": True,
+        },
+    )
+    task_udf_time: float = field(
+        default=0,
+        metadata={
+            "description": "Time actively using CPU for UDF within tasks",
+            "metrics_group": "tasks",
+            "map_only": True,
         },
     )
 
@@ -475,6 +507,7 @@ class OpRuntimeMetrics:
 
         self.num_task_outputs_generated += num_outputs
         self.bytes_task_outputs_generated += output_bytes
+        self.average_bytes_task_outputs_generated = int(self.bytes_task_outputs_generated / self.num_task_outputs_generated)
 
         task_info = self._running_tasks[task_index]
         if task_info.num_outputs == 0:
@@ -485,6 +518,10 @@ class OpRuntimeMetrics:
         for block_ref, meta in output.blocks:
             assert meta.exec_stats and meta.exec_stats.wall_time_s
             self.block_generation_time += meta.exec_stats.wall_time_s
+            if meta.exec_stats.backpressure_time:
+                self.in_task_backpressure_time += meta.exec_stats.backpressure_time
+            self.task_cpu_time += meta.exec_stats.cpu_time_s
+            self.task_udf_time += meta.exec_stats.udf_time_s
             assert meta.num_rows is not None
             self.rows_task_outputs_generated += meta.num_rows
             trace_allocation(block_ref, "operator_output")

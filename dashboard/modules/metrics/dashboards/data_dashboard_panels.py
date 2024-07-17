@@ -289,6 +289,20 @@ DATA_GRAFANA_PANELS = [
         fill=0,
         stack=False,
     ),
+    Panel(
+        id=40,
+        title="Average Size of Output Blocks",
+        description="Denotes the average size of blocks, taken across all outputs from this operator.",
+        unit="blocks",
+        targets=[
+            Target(
+                expr="sum(ray_data_average_bytes_task_outputs_generated{{{global_filters}}}) by (dataset, operator)",
+                legend="Average Size of Blocks: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=False,
+    ),
     # Ray Data Metrics (Tasks)
     Panel(
         id=29,
@@ -383,6 +397,48 @@ DATA_GRAFANA_PANELS = [
             Target(
                 expr="sum(ray_data_task_submission_backpressure_time{{{global_filters}}}) by (dataset, operator)",
                 legend="Backpressure Time: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=True,
+    ),
+    Panel(
+        id=38,
+        title="In-Task Backpressure Time",
+        description="Time spent within a running task in backpressure.",
+        unit="seconds",
+        targets=[
+            Target(
+                expr="sum(ray_data_in_task_backpressure_time{{{global_filters}}}) by (dataset, operator)",
+                legend="In-Task Backpressure Time: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=True,
+    ),
+    Panel(
+        id=39,
+        title="Task CPU Time",
+        description="Time spent using CPU within a running task.",
+        unit="seconds",
+        targets=[
+            Target(
+                expr="sum(ray_data_task_cpu_time{{{global_filters}}}) by (dataset, operator)",
+                legend="Task CPU Time: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=True,
+    ),
+    Panel(
+        id=41,
+        title="Task UDF Time",
+        description="Time spent using CPU for UDFs within a running task.",
+        unit="seconds",
+        targets=[
+            Target(
+                expr="sum(ray_data_task_udf_time{{{global_filters}}}) by (dataset, operator)",
+                legend="Task UDF Time: {{dataset}}, {{operator}}",
             )
         ],
         fill=0,

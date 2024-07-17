@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Set, Union
 
 import ray
+import time
 from ray import ObjectRef
 from ray._raylet import ObjectRefGenerator
 from ray.data._internal.compute import (
@@ -290,6 +291,7 @@ class MapOperator(OneToOneOperator, ABC):
 
         def _output_ready_callback(task_index, output: RefBundle):
             # Since output is streamed, it should only contain one block.
+            breakpoint()
             assert len(output) == 1
             self._metrics.on_task_output_generated(task_index, output)
 
@@ -422,9 +424,11 @@ def _map_task(
         m_out.exec_stats = stats.build()
         m_out.exec_stats.udf_time_s = map_transformer.udf_time()
         m_out.exec_stats.task_idx = ctx.task_idx
+        finish_time = time.perf_counter()
         yield b_out
         yield m_out
         stats = BlockExecStats.builder()
+        stats.prev_time = finish_time
 
 
 class _BlockRefBundler:

@@ -291,7 +291,6 @@ class MapOperator(OneToOneOperator, ABC):
 
         def _output_ready_callback(task_index, output: RefBundle):
             # Since output is streamed, it should only contain one block.
-            breakpoint()
             assert len(output) == 1
             self._metrics.on_task_output_generated(task_index, output)
 

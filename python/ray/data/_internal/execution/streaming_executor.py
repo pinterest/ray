@@ -324,6 +324,7 @@ class StreamingExecutor(Executor, threading.Thread):
             op_state.refresh_progress_bar(self._resource_manager)
 
         self._update_stats_metrics(state="RUNNING")
+        self._resource_manager.update_stats_metrics()
         if time.time() - self._last_debug_log_time >= DEBUG_LOG_INTERVAL_SECONDS:
             _log_op_metrics(topology)
             if not DEBUG_TRACE_SCHEDULING:

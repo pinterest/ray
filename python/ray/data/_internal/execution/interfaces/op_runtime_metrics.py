@@ -306,8 +306,38 @@ class OpRuntimeMetrics:
         },
     )
 
+    
     # === Miscellaneous metrics ===
     # Use "metrics_group: "misc" in the metadata for new metrics in this section.
+    resource_allocator_budgeted_bytes: float = field(
+        default=0,
+        metadata={
+            "description": "Byte size of budgeted memory usage",
+            "metrics_group": "misc",
+        },
+    )
+    resource_allocator_reserved_bytes: float = field(
+        default=0,
+        metadata={
+            "description": "Byte size of reserved memory usage",
+            "metrics_group": "misc",
+        },
+    )
+    resource_allocator_shared_memory: float = field(
+        default=0,
+        metadata={
+            "description": "Byte size of total shared memory",
+            "metrics_group": "misc",
+        },
+    )
+    resource_allocator_global_limits: float = field(
+        default=0,
+        metadata={
+            "description": "Byte size of the global limits of object store memory",
+            "metrics_group": "misc",
+        },
+    )
+
 
     def __init__(self, op: "PhysicalOperator"):
         from ray.data._internal.execution.operators.map_operator import MapOperator

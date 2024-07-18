@@ -589,6 +589,62 @@ DATA_GRAFANA_PANELS = [
         stack=False,
     ),
     # Ray Data Metrics (Miscellaneous)
+    Panel(
+        id=42,
+        title="Resource Allocator Budgeted Bytes",
+        description="Amount in bytes that the resource manager budgeted to operator",
+        unit="bytes",
+        targets=[
+            Target(
+                expr="sum(ray_data_resource_allocator_budgeted_bytes{{{global_filters}}}) by (dataset, operator)",
+                legend="Bytes: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=False,
+    ),
+    Panel(
+        id=43,
+        title="Resource Allocator Shared Memory",
+        description="Amount in bytes that is shared between all operators",
+        unit="bytes",
+        targets=[
+            Target(
+                expr="sum(ray_data_resource_allocator_shared_memory{{{global_filters}}}) by (dataset, operator)",
+                legend="Bytes: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=False,
+    ),
+    Panel(
+        id=44,
+        title="Resource Allocator Global Memory Limits",
+        description="Global object store memory limit for the streaming executor",
+        unit="bytes",
+        targets=[
+            Target(
+                expr="sum(ray_data_resource_allocator_global_limits{{{global_filters}}}) by (dataset, operator)",
+                legend="Bytes: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=False,
+    ),
+    Panel(
+        id=45,
+        title="Resource Allocator Reserved Bytes",
+        description="Number of bytes reserved for the operator",
+        unit="bytes",
+        targets=[
+            Target(
+                expr="sum(ray_data_resource_allocator_reserved_bytes{{{global_filters}}}) by (dataset, operator)",
+                legend="Bytes: {{dataset}}, {{operator}}",
+            )
+        ],
+        fill=0,
+        stack=False,
+    ),
 ]
 
 ids = []

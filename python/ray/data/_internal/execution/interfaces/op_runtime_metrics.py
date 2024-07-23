@@ -427,10 +427,11 @@ class OpRuntimeMetrics:
         context = ray.data.DataContext.get_current()
         if context._max_num_blocks_in_streaming_gen_buffer is None:
             return None
-
+    
+        estimation_ratio = context.op_resource_memory_estimation_ratio
         bytes_per_output = (
             self.average_bytes_per_output or context.target_max_block_size
-        )
+        ) * estimation_ratio
 
         num_pending_outputs = context._max_num_blocks_in_streaming_gen_buffer
         if self.average_num_outputs_per_task is not None:
@@ -551,7 +552,7 @@ class OpRuntimeMetrics:
             if meta.exec_stats.backpressure_time:
                 self.in_task_backpressure_time += meta.exec_stats.backpressure_time
             self.task_cpu_time += meta.exec_stats.cpu_time_s
-            self.task_udf_time += meta.exec_stats.udf_time_s
+            self.task_udf_time = meta.exec_stats.udf_time_s
             assert meta.num_rows is not None
             self.rows_task_outputs_generated += meta.num_rows
             trace_allocation(block_ref, "operator_output")

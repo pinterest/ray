@@ -309,7 +309,6 @@ class _StatsActor:
             description="Number of blocks in remote nodes",
             tag_keys=iter_tag_keys,
         )
-
         self.iter_blocks_unknown = Gauge(
             "data_iter_blocks_unknown",
             description="Number of blocks with unknown location",
@@ -319,13 +318,6 @@ class _StatsActor:
         self.streaming_split_coordinator_s = Gauge(
             "data_iter_streaming_split_coordinator_seconds",
             description="Seconds spent in the coordinator actor to distribute blocks",
-            tag_keys=iter_tag_keys,
-        )
-
-
-        self.streaming_exec_schedule_s = Gauge(
-            "data_streaming_exec_schedule_seconds",
-            description="Seconds spent streaming executor scheduling",
             tag_keys=iter_tag_keys,
         )
 

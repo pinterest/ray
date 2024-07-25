@@ -430,20 +430,6 @@ DATA_GRAFANA_PANELS = [
         fill=0,
         stack=True,
     ),
-    Panel(
-        id=41,
-        title="Task UDF Time",
-        description="Time spent using CPU for UDFs within a running task.",
-        unit="seconds",
-        targets=[
-            Target(
-                expr="sum(ray_data_task_udf_time{{{global_filters}}}) by (dataset, operator)",
-                legend="Task UDF Time: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=True,
-    ),
     # Ray Data Metrics (Object Store Memory)
     Panel(
         id=13,
@@ -590,7 +576,7 @@ DATA_GRAFANA_PANELS = [
     ),
     # Ray Data Metrics (Miscellaneous)
     Panel(
-        id=42,
+        id=41,
         title="Resource Allocator Budgeted Bytes",
         description="Amount in bytes that the resource manager budgeted to operator",
         unit="bytes",
@@ -604,7 +590,7 @@ DATA_GRAFANA_PANELS = [
         stack=False,
     ),
     Panel(
-        id=43,
+        id=42,
         title="Resource Allocator Shared Memory",
         description="Amount in bytes that is shared between all operators",
         unit="bytes",
@@ -618,7 +604,7 @@ DATA_GRAFANA_PANELS = [
         stack=False,
     ),
     Panel(
-        id=44,
+        id=43,
         title="Resource Allocator Global Memory Limits",
         description="Global object store memory limit for the streaming executor",
         unit="bytes",
@@ -632,7 +618,7 @@ DATA_GRAFANA_PANELS = [
         stack=False,
     ),
     Panel(
-        id=45,
+        id=44,
         title="Resource Allocator Reserved Bytes",
         description="Number of bytes reserved for the operator",
         unit="bytes",

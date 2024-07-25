@@ -232,14 +232,6 @@ class OpRuntimeMetrics:
             "map_only": True,
         },
     )
-    task_udf_time: float = field(
-        default=0,
-        metadata={
-            "description": "Time actively using CPU for UDF within tasks",
-            "metrics_group": "tasks",
-            "map_only": True,
-        },
-    )
 
     # === Object store memory metrics ===
     obj_store_mem_internal_inqueue_blocks: int = field(
@@ -552,7 +544,6 @@ class OpRuntimeMetrics:
             if meta.exec_stats.backpressure_time:
                 self.in_task_backpressure_time += meta.exec_stats.backpressure_time
             self.task_cpu_time += meta.exec_stats.cpu_time_s
-            self.task_udf_time = meta.exec_stats.udf_time_s
             assert meta.num_rows is not None
             self.rows_task_outputs_generated += meta.num_rows
             trace_allocation(block_ref, "operator_output")

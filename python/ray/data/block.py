@@ -167,7 +167,7 @@ class _BlockExecStatsBuilder:
     def __init__(self):
         self.start_time = time.perf_counter()
         self.start_cpu = time.process_time()
-        self.prev_time = None
+        self.prev_map_task_finish_time = None
 
     def build(self) -> "BlockExecStats":
         self.end_time = time.perf_counter()
@@ -178,8 +178,8 @@ class _BlockExecStatsBuilder:
         stats.end_time_s = self.end_time
         stats.wall_time_s = self.end_time - self.start_time
         stats.cpu_time_s = self.end_cpu - self.start_cpu
-        if self.prev_time:
-            stats.backpressure_time = self.start_time - self.prev_time
+        if self.prev_map_task_finish_time:
+            stats.backpressure_time = self.start_time - self.prev_map_task_finish_time
         if resource is None:
             # NOTE(swang): resource package is not supported on Windows. This
             # is only the memory usage at the end of the task, not the peak

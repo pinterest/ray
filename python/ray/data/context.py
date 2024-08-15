@@ -153,13 +153,6 @@ DEFAULT_OP_RESOURCE_RESERVATION_RATIO = float(
     os.environ.get("RAY_DATA_OP_RESERVATION_RATIO", "0.5")
 )
 
-# This value determines the aggresiveness of memory estimations
-# for the operator resource reservation and estimation system. 
-# The purpose is to give users control over the backpressure 
-# that occurs from not pulling objects from generator queues
-# to their downstream operators.
-DEFAULT_OP_RESOURCE_MEMORY_ESTIMATION_RATIO = 1.0
-
 # Default value of the max number of blocks that can be buffered at the
 # streaming generator of each `DataOpTask`.
 # Note, if this value is too large, we'll need to allocate more memory
@@ -267,8 +260,6 @@ class DataContext:
         # The reservation ratio for ReservationOpResourceAllocator.
         self.op_resource_reservation_ratio = DEFAULT_OP_RESOURCE_RESERVATION_RATIO
         # Minimum number of read output blocks for a dataset.
-        self.op_resource_memory_estimation_ratio = DEFAULT_OP_RESOURCE_MEMORY_ESTIMATION_RATIO
-        # The reservation ratio for ReservationOpResourceAllocator.
         self.read_op_min_num_blocks = DEFAULT_READ_OP_MIN_NUM_BLOCKS
 
     @staticmethod

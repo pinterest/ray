@@ -420,10 +420,9 @@ class OpRuntimeMetrics:
         if context._max_num_blocks_in_streaming_gen_buffer is None:
             return None
     
-        estimation_ratio = context.op_resource_memory_estimation_ratio
         bytes_per_output = (
             self.average_bytes_per_output or context.target_max_block_size
-        ) * estimation_ratio
+        )
 
         num_pending_outputs = context._max_num_blocks_in_streaming_gen_buffer
         if self.average_num_outputs_per_task is not None:

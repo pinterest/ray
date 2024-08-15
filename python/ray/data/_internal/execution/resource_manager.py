@@ -230,9 +230,9 @@ class ResourceManager:
         assert self._op_resource_allocator is not None
         return self._op_resource_allocator
 
-    def update_stats_metrics(self):
+    def update_op_runtime_metrics(self):
         if self.op_resource_allocator_enabled():
-            self._op_resource_allocator.update_stats_metrics()
+            self._op_resource_allocator.update_op_runtime_metrics()
 
 
 class OpResourceAllocator(ABC):
@@ -263,9 +263,9 @@ class OpResourceAllocator(ABC):
         ...
     
     @abstractmethod
-    def update_stats_metrics(self, op: PhysicalOperator) -> Optional[int]:
+    def update_op_runtime_metrics(self):
         """Updates operator metrics"""
-        ...
+        raise NotImplemented
 
 
 class ReservationOpResourceAllocator(OpResourceAllocator):
@@ -555,7 +555,7 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
             else:
                 yield from self._get_downstream_map_ops(next_op)
     
-    def update_stats_metrics(self):
+    def update_op_runtime_metrics(self):
         ops = self._get_eligible_ops()
         for op in ops:
             metrics = op.metrics

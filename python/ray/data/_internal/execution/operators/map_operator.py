@@ -427,7 +427,7 @@ def _map_task(
         yield b_out
         yield m_out
         stats = BlockExecStats.builder()
-        stats.prev_time = finish_time
+        stats.prev_map_task_finish_time = finish_time
 
 
 class _BlockRefBundler:

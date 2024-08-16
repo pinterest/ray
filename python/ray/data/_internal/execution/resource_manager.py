@@ -554,7 +554,7 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
                 yield next_op
             else:
                 yield from self._get_downstream_map_ops(next_op)
-    
+
     def update_op_runtime_metrics(self):
         ops = self._get_eligible_ops()
         for i, op in enumerate(ops):
@@ -567,7 +567,6 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
             if i == 0: 
                 metrics.resource_allocator_shared_memory = self._total_shared.object_store_memory
                 metrics.resource_allocator_global_limits = self._cached_global_limits.object_store_memory
-            
 
     def update_usages(self):
         self._update_reservation()

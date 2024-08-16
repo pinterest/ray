@@ -265,7 +265,7 @@ class OpResourceAllocator(ABC):
     @abstractmethod
     def update_op_runtime_metrics(self):
         """Updates operator metrics"""
-        raise NotImplemented
+        raise NotImplementedError
 
 
 class ReservationOpResourceAllocator(OpResourceAllocator):
@@ -564,7 +564,7 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
 
             # Since the total shared and global limits are in-fact global,
             # we only want to set them for the first operator.
-            if i == 0: 
+            if i == 0:
                 metrics.resource_allocator_shared_memory = self._total_shared.object_store_memory
                 metrics.resource_allocator_global_limits = self._cached_global_limits.object_store_memory
 

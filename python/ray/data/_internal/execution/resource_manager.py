@@ -557,8 +557,6 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
     
     def update_op_runtime_metrics(self):
         ops = self._get_eligible_ops()
-
-
         for i, op in enumerate(ops):
             metrics = op.metrics
             metrics.resource_allocator_budgeted_bytes = self._op_budgets[op].object_store_memory

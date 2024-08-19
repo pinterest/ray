@@ -302,7 +302,7 @@ class _StatsActor:
         )
         self.iter_next_batch_s = Gauge(
             "data_iter_next_batch_seconds",
-            description="Seconds spent getting next batch", # Need a better description for this?
+            description="Seconds spent getting next batch",
             tag_keys=iter_tag_keys,
         )
         self.iter_format_batch_s = Gauge(
@@ -331,7 +331,6 @@ class _StatsActor:
             description="Number of blocks in remote nodes",
             tag_keys=iter_tag_keys,
         )
-
         self.iter_blocks_unknown = Gauge(
             "data_iter_blocks_unknown",
             description="Number of blocks with unknown location",

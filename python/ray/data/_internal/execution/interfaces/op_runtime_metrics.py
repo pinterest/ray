@@ -409,6 +409,22 @@ class OpRuntimeMetrics(metaclass=OpRuntimesMetricsMeta):
         description="Number of pending actors.",
         metrics_group=MetricsGroup.ACTORS,
     )
+    task_cpu_time: float = field(
+        default=0,
+        metadata={
+            "description": "Time actively using CPU within tasks",
+            "metrics_group": "tasks",
+            "map_only": True,
+        },
+    )
+    in_task_backpressure_time: float = field(
+        default=0,
+        metadata={
+            "description": "Time spent waiting idly on generator outputs to be yielded within tasks",
+            "metrics_group": "tasks",
+            "map_only": True,
+        },
+    )
 
     # === Object store memory metrics ===
     obj_store_mem_internal_inqueue_blocks: int = metric_field(
@@ -438,7 +454,6 @@ class OpRuntimeMetrics(metaclass=OpRuntimesMetricsMeta):
         description="Byte size of used memory in object store.",
         metrics_group=MetricsGroup.OBJECT_STORE_MEMORY,
     )
-
     # === Miscellaneous metrics ===
     # Use "metrics_group: "misc" in the metadata for new metrics in this section.
 
@@ -721,6 +736,9 @@ class OpRuntimeMetrics(metaclass=OpRuntimesMetricsMeta):
                 meta.exec_stats is not None and meta.exec_stats.wall_time_s is not None
             )
             self.block_generation_time += meta.exec_stats.wall_time_s
+            if meta.exec_stats.backpressure_time:
+                self.in_task_backpressure_time += meta.exec_stats.backpressure_time
+            self.task_cpu_time += meta.exec_stats.cpu_time_s
             assert meta.num_rows is not None
             self.rows_task_outputs_generated += meta.num_rows
             trace_allocation(block_ref, "operator_output")

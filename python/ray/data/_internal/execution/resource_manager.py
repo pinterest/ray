@@ -230,10 +230,6 @@ class ResourceManager:
         assert self._op_resource_allocator is not None
         return self._op_resource_allocator
 
-    def update_op_runtime_metrics(self):
-        if self.op_resource_allocator_enabled():
-            self._op_resource_allocator.update_op_runtime_metrics()
-
 
 class OpResourceAllocator(ABC):
     """An interface for dynamic operator resource allocation.
@@ -261,11 +257,6 @@ class OpResourceAllocator(ABC):
         """Return the maximum bytes of pending task outputs can be read for
         the given operator. None means no limit."""
         ...
-    
-    @abstractmethod
-    def update_op_runtime_metrics(self):
-        """Updates operator metrics"""
-        raise NotImplementedError
 
 
 class ReservationOpResourceAllocator(OpResourceAllocator):
@@ -554,19 +545,6 @@ class ReservationOpResourceAllocator(OpResourceAllocator):
                 yield next_op
             else:
                 yield from self._get_downstream_map_ops(next_op)
-
-    def update_op_runtime_metrics(self):
-        ops = self._get_eligible_ops()
-        for i, op in enumerate(ops):
-            metrics = op.metrics
-            metrics.resource_allocator_budgeted_bytes = self._op_budgets[op].object_store_memory
-            metrics.resource_allocator_reserved_bytes = self._op_reserved[op].object_store_memory
-
-            # Since the total shared and global limits are in-fact global,
-            # we only want to set them for the first operator.
-            if i == 0:
-                metrics.resource_allocator_shared_memory = self._total_shared.object_store_memory
-                metrics.resource_allocator_global_limits = self._cached_global_limits.object_store_memory
 
     def update_usages(self):
         self._update_reservation()

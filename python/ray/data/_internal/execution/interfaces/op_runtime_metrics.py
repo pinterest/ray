@@ -151,14 +151,6 @@ class OpRuntimeMetrics:
             "map_only": True,
         },
     )
-    average_bytes_task_outputs_generated: int = field(
-        default=0,
-        metadata={
-            "description": "The average size in bytes of outputs from this operator",
-            "metrics_group": "outputs",
-            "map_only": True,
-        },
-    )
 
     # === Tasks-related metrics ===
     num_tasks_submitted: int = field(
@@ -297,39 +289,8 @@ class OpRuntimeMetrics:
             "metrics_group": "object_store_memory",
         },
     )
-
-    
     # === Miscellaneous metrics ===
     # Use "metrics_group: "misc" in the metadata for new metrics in this section.
-    resource_allocator_budgeted_bytes: float = field(
-        default=0,
-        metadata={
-            "description": "Byte size of budgeted memory usage",
-            "metrics_group": "misc",
-        },
-    )
-    resource_allocator_reserved_bytes: float = field(
-        default=0,
-        metadata={
-            "description": "Byte size of reserved memory usage",
-            "metrics_group": "misc",
-        },
-    )
-    resource_allocator_shared_memory: float = field(
-        default=0,
-        metadata={
-            "description": "Byte size of total shared memory",
-            "metrics_group": "misc",
-        },
-    )
-    resource_allocator_global_limits: float = field(
-        default=0,
-        metadata={
-            "description": "Byte size of the global limits of object store memory",
-            "metrics_group": "misc",
-        },
-    )
-
 
     def __init__(self, op: "PhysicalOperator"):
         from ray.data._internal.execution.operators.map_operator import MapOperator
@@ -419,10 +380,11 @@ class OpRuntimeMetrics:
         context = ray.data.DataContext.get_current()
         if context._max_num_blocks_in_streaming_gen_buffer is None:
             return None
-
+    
+        estimation_ratio = context.op_resource_memory_estimation_ratio
         bytes_per_output = (
             self.average_bytes_per_output or context.target_max_block_size
-        )
+        ) * estimation_ratio
 
         num_pending_outputs = context._max_num_blocks_in_streaming_gen_buffer
         if self.average_num_outputs_per_task is not None:
@@ -529,7 +491,6 @@ class OpRuntimeMetrics:
 
         self.num_task_outputs_generated += num_outputs
         self.bytes_task_outputs_generated += output_bytes
-        self.average_bytes_task_outputs_generated = int(self.bytes_task_outputs_generated / self.num_task_outputs_generated)
 
         task_info = self._running_tasks[task_index]
         if task_info.num_outputs == 0:

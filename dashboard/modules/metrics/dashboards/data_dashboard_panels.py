@@ -289,20 +289,6 @@ DATA_GRAFANA_PANELS = [
         fill=0,
         stack=False,
     ),
-    Panel(
-        id=40,
-        title="Average Size of Output Blocks",
-        description="Denotes the average size of blocks, taken across all outputs from this operator.",
-        unit="blocks",
-        targets=[
-            Target(
-                expr="sum(ray_data_average_bytes_task_outputs_generated{{{global_filters}}}) by (dataset, operator)",
-                legend="Average Size of Blocks: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=False,
-    ),
     # Ray Data Metrics (Tasks)
     Panel(
         id=29,
@@ -575,62 +561,6 @@ DATA_GRAFANA_PANELS = [
         stack=False,
     ),
     # Ray Data Metrics (Miscellaneous)
-    Panel(
-        id=41,
-        title="Resource Allocator Budgeted Bytes",
-        description="Amount in bytes that the resource manager budgeted to operator",
-        unit="bytes",
-        targets=[
-            Target(
-                expr="sum(ray_data_resource_allocator_budgeted_bytes{{{global_filters}}}) by (dataset, operator)",
-                legend="Bytes: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=False,
-    ),
-    Panel(
-        id=42,
-        title="Resource Allocator Shared Memory",
-        description="Amount in bytes that is shared between all operators",
-        unit="bytes",
-        targets=[
-            Target(
-                expr="sum(ray_data_resource_allocator_shared_memory{{{global_filters}}}) by (dataset, operator)",
-                legend="Bytes: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=False,
-    ),
-    Panel(
-        id=43,
-        title="Resource Allocator Global Memory Limits",
-        description="Global object store memory limit for the streaming executor",
-        unit="bytes",
-        targets=[
-            Target(
-                expr="sum(ray_data_resource_allocator_global_limits{{{global_filters}}}) by (dataset, operator)",
-                legend="Bytes: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=False,
-    ),
-    Panel(
-        id=44,
-        title="Resource Allocator Reserved Bytes",
-        description="Number of bytes reserved for the operator",
-        unit="bytes",
-        targets=[
-            Target(
-                expr="sum(ray_data_resource_allocator_reserved_bytes{{{global_filters}}}) by (dataset, operator)",
-                legend="Bytes: {{dataset}}, {{operator}}",
-            )
-        ],
-        fill=0,
-        stack=False,
-    ),
 ]
 
 ids = []

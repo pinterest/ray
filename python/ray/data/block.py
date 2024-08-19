@@ -138,6 +138,7 @@ class BlockExecStats:
         self.wall_time_s: Optional[float] = None
         self.udf_time_s: Optional[float] = 0
         self.cpu_time_s: Optional[float] = None
+        self.backpressure_time: Optional[float] = None
         self.node_id = ray.runtime_context.get_runtime_context().get_node_id()
         self.max_uss_bytes: int = 0
         self.task_idx: Optional[int] = None
@@ -167,6 +168,7 @@ class _BlockExecStatsBuilder:
     def __init__(self):
         self._start_time = time.perf_counter()
         self._start_cpu = time.process_time()
+        self.prev_map_task_finish_time = None
 
     def build(self) -> "BlockExecStats":
         # Record end times.
@@ -179,6 +181,8 @@ class _BlockExecStatsBuilder:
         stats.end_time_s = end_time
         stats.wall_time_s = end_time - self._start_time
         stats.cpu_time_s = end_cpu - self._start_cpu
+        if self.prev_map_task_finish_time:
+            stats.backpressure_time = self._start_time - self.prev_map_task_finish_time
 
         return stats
 

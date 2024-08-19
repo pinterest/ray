@@ -18,6 +18,7 @@ from typing import (
 )
 
 import ray
+import time
 from ray import ObjectRef
 from ray._raylet import ObjectRefGenerator
 from ray.data._internal.compute import (
@@ -572,9 +573,11 @@ def _map_task(
             m_out.exec_stats.task_idx = ctx.task_idx
             m_out.exec_stats.max_uss_bytes = profiler.estimate_max_uss()
             meta_with_schema = BlockMetadataWithSchema(metadata=m_out, schema=s_out)
+            finish_time = time.perf_counter()
             yield b_out
             yield meta_with_schema
             stats = BlockExecStats.builder()
+            stats.prev_map_task_finish_time = finish_time
             profiler.reset()
 
     TaskContext.reset_current()

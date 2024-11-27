@@ -86,7 +86,6 @@ class ParquetBaseDatasource(FileBasedDatasource):
     
         if total == 0:  
             return 
-        else:  
-            percent = (total - null) / total  
-    
+
+        percent = (total - null) / total      
         self.null_count_metric.observe(percent)

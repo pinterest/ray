@@ -16,6 +16,7 @@ from ray.data._internal.execution.interfaces import (
     PhysicalOperator,
     RefBundle,
 )
+from ray.data._internal.execution.interfaces.task_context import TaskContext
 from ray.data._internal.execution.operators.actor_pool_map_operator import (
     ActorPoolMapOperator,
 )

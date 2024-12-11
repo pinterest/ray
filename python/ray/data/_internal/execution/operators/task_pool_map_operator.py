@@ -76,7 +76,8 @@ class TaskPoolMapOperator(MapOperator):
             self._map_transformer_ref,
             data_context,
             ctx,
-            *input_blocks,
+            *bundle.block_refs,
+            **self.get_map_task_kwargs(),
         )
         self._submit_data_task(gen, bundle)
 

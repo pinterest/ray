@@ -11,7 +11,7 @@ from ray.data.datasource.mongo_datasource import _validate_database_collection_e
 logger = logging.getLogger(__name__)
 
 
-class _MongoDatasink(Datasink):
+class MongoDatasink(Datasink[None]):
     def __init__(self, uri: str, database: str, collection: str) -> None:
         _check_import(self, module="pymongo", package="pymongo")
         _check_import(self, module="pymongoarrow", package="pymongoarrow")

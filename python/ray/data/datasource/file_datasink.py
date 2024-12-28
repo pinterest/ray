@@ -1,5 +1,5 @@
 import posixpath
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional
 
 from ray._private.utils import _add_creatable_buckets_param_if_s3_uri
 from ray.data._internal.dataset_logger import DatasetLogger
@@ -27,7 +27,7 @@ WRITE_FILE_MAX_ATTEMPTS = 10
 WRITE_FILE_RETRY_MAX_BACKOFF_SECONDS = 32
 
 
-class _FileDatasink(Datasink):
+class _FileDatasink(Datasink[None]):
     def __init__(
         self,
         path: str,
@@ -122,13 +122,10 @@ class _FileDatasink(Datasink):
     def write_block(self, block: BlockAccessor, block_index: int, ctx: TaskContext):
         raise NotImplementedError
 
-    def on_write_complete(self, write_result_blocks: List[Block]) -> WriteResult:
-        aggregated_results = super().on_write_complete(write_result_blocks)
-
+    def on_write_complete(self, write_result: WriteResult[None]):
         # If no rows were written, we can delete the directory.
-        if self.has_created_dir and aggregated_results.num_rows == 0:
+        if self.has_created_dir and write_result.num_rows == 0:
             self.filesystem.delete_dir(self.path)
-        return aggregated_results
 
     @property
     def supports_distributed_writes(self) -> bool:
@@ -181,13 +178,15 @@ class RowBasedFileDatasink(_FileDatasink):
             )
             write_path = posixpath.join(self.path, filename)
 
-            def write_row_to_path():
+            def write_row_to_path(row, write_path):
                 with self.open_output_stream(write_path) as file:
                     self.write_row_to_file(row, file)
 
             logger.get_logger(log_to_stdout=False).debug(f"Writing {write_path} file.")
             call_with_retry(
-                write_row_to_path,
+                lambda row=row, write_path=write_path: write_row_to_path(
+                    row, write_path
+                ),
                 description=f"write '{write_path}'",
                 match=DataContext.get_current().write_file_retry_on_errors,
                 max_attempts=WRITE_FILE_MAX_ATTEMPTS,

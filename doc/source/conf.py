@@ -92,6 +92,18 @@ myst_enable_extensions = [
 
 myst_heading_anchors = 3
 
+# Make broken internal references into build time errors.
+# See https://www.sphinx-doc.org/en/master/usage/configuration.html#confval-nitpicky
+# for more information. :py:class: references are ignored due to false positives
+# arising from type annotations. See https://github.com/ray-project/ray/pull/46103
+# for additional context.
+nitpicky = True
+nitpick_ignore_regex = [
+    ("py:class", ".*"),
+    # Workaround for https://github.com/sphinx-doc/sphinx/issues/10974
+    ("py:obj", "ray\.data\.datasource\.datasink\.WriteReturnType"),
+]
+
 # Cache notebook outputs in _build/.jupyter_cache
 # To prevent notebook execution, set this to "off". To force re-execution, set this to
 # "force". To cache previous runs, set this to "cache".

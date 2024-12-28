@@ -8,6 +8,13 @@ from ray.data.datasource.block_path_provider import (
 from ray.data.datasource.csv_datasink import _CSVDatasink
 from ray.data.datasource.csv_datasource import CSVDatasource
 from ray.data.datasource.datasink import Datasink, DummyOutputDatasink
+from ray.data._internal.datasource.sql_datasource import Connection
+from ray.data.datasource.datasink import (
+    Datasink,
+    DummyOutputDatasink,
+    WriteResult,
+    WriteReturnType,
+)
 from ray.data.datasource.datasource import (
     Datasource,
     RandomIntRowDatasource,
@@ -113,4 +120,6 @@ __all__ = [
     "_WebDatasetDatasink",
     "WebDatasetDatasource",
     "_S3FileSystemWrapper",
+    "WriteResult",
+    "WriteReturnType",
 ]

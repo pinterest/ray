@@ -20,7 +20,8 @@ from ray.data.block import Block
 from ray.data.context import DataContext
 from ray.data.datasource.datasource import ReadTask
 
-TASK_SIZE_WARN_THRESHOLD_BYTES = 100000
+# As one readTask can contain multiple paths, we increase to 1MB to prevent excessive log messages.
+TASK_SIZE_WARN_THRESHOLD_BYTES = 1000000
 
 # Transient errors that can occur during longer reads. Trigger retry when these occur.
 READ_FILE_RETRY_ON_ERRORS = ["AWS Error NETWORK_CONNECTION", "AWS Error ACCESS_DENIED"]

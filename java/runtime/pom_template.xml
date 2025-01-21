@@ -6,9 +6,9 @@
   <parent>
     <groupId>io.ray</groupId>
     <artifactId>ray-superpom</artifactId>
-    <version>2.10.0</version>
+    <version>2.10.0+pinterest8</version>
   </parent>
-  <modelVersion>4.0.0+pinterest8</modelVersion>
+  <modelVersion>4.0.0</modelVersion>
 
   <artifactId>ray-runtime</artifactId>
   <name>ray runtime</name>

@@ -1,3 +1,6 @@
+import logging
+import os
+
 from typing import Optional
 
 from ray.data._internal.arrow_block import ArrowBlockAccessor
@@ -11,7 +14,8 @@ from ray.data.block import Block, BlockAccessor
 # See https://github.com/ray-project/ray/issues/31108 for more details.
 # TODO(jjyao): remove this once
 # https://github.com/apache/arrow/issues/35126 is resolved.
-MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS = 2
+# Make this configurable to void unnecessary combine chunks
+MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS = int(os.getenv('RAY_DATA_MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS', 2))
 
 # Delay compaction until the shuffle buffer has reached this ratio over the min
 # shuffle buffer size. Setting this to 1 minimizes memory usage, at the cost of
@@ -19,6 +23,8 @@ MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS = 2
 # reduces compaction frequency.
 SHUFFLE_BUFFER_COMPACTION_RATIO = 1.5
 
+
+logger = logging.getLogger(__name__)
 
 class BatcherInterface:
     def add(self, block: Block):
@@ -142,6 +148,7 @@ class Batcher(BatcherInterface):
                     and block.column(0).num_chunks
                     >= MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS
                 ):
+                    logger.warning(f"Detected combine_chunks in Batcher. Number of chunks: {block.column(0).num_chunks}, threshold: {MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS}")
                     accessor = BlockAccessor.for_block(
                         transform_pyarrow.combine_chunks(block)
                     )
@@ -313,6 +320,7 @@ class ShufflingBatcher(BatcherInterface):
                 and self._shuffle_buffer.column(0).num_chunks
                 >= MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS
             ):
+                logger.warning(f"Detected combine_chunks in ShuffleBatcher. Number of chunks: {block.column(0).num_chunks}, threshold: {MIN_NUM_CHUNKS_TO_TRIGGER_COMBINE_CHUNKS}")
                 self._shuffle_buffer = transform_pyarrow.combine_chunks(
                     self._shuffle_buffer
                 )

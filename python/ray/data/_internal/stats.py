@@ -24,7 +24,7 @@ logger = DatasetLogger(__name__)
 
 STATS_ACTOR_NAME = "datasets_stats_actor"
 STATS_ACTOR_NAMESPACE = "_dataset_stats_actor"
-
+MAX_STATS_TAG_LENGTH = 100
 
 StatsDict = Dict[str, List[BlockMetadata]]
 
@@ -508,6 +508,10 @@ class _StatsActor:
     def _create_tags(self, dataset_tag: str, operator_tag: Optional[str] = None):
         tags = {"dataset": dataset_tag}
         if operator_tag is not None:
+            operator_tag_list = operator_tag.split("->")
+            if len(operator_tag) > MAX_STATS_TAG_LENGTH or len(operator_tag_list) > 2:
+                operator_tag = operator_tag_list[0] + "->...->" + operator_tag_list[-1]
+                operator_tag = operator_tag[:MAX_STATS_TAG_LENGTH]
             tags["operator"] = operator_tag
         return tags
 

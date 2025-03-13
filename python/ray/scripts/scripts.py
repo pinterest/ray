@@ -562,6 +562,13 @@ Windows powershell users need additional escaping:
     type=str,
     help="a JSON serialized dictionary mapping label name to label value.",
 )
+@click.option(
+    "--numa-nodes",
+    required=False,
+    default=None,
+    type=str,
+    help="A comma separated list of numa node id. If provided raylet and ray worker processes will be retricted to certain numa node",
+)
 @add_click_logging_options
 @PublicAPI
 def start(
@@ -608,6 +615,7 @@ def start(
     ray_debugger_external,
     disable_usage_stats,
     labels,
+    numa_nodes,
 ):
     """Start Ray processes manually on the local machine."""
 
@@ -697,6 +705,7 @@ def start(
         no_monitor=no_monitor,
         tracing_startup_hook=tracing_startup_hook,
         ray_debugger_external=ray_debugger_external,
+        numa_nodes=numa_nodes,
     )
 
     if ray_constants.RAY_START_HOOK in os.environ:

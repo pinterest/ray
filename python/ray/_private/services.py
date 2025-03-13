@@ -1527,6 +1527,7 @@ def start_raylet(
     node_name: Optional[str] = None,
     webui: Optional[str] = None,
     labels: Optional[dict] = None,
+    numa_nodes: Optional[str] = None,
 ):
     """Start a raylet, which is a combined local scheduler and object manager.
 
@@ -1674,6 +1675,12 @@ def start_raylet(
             f"--cluster-id={cluster_id}",
         ]
     )
+    if numa_nodes is not None:
+        start_worker_command = [
+            "numactl",
+            f"--cpunodebind={numa_nodes}",
+            f"--membind={numa_nodes}",
+        ] + start_worker_command
 
     if storage is not None:
         start_worker_command.append(f"--storage={storage}")
@@ -1779,6 +1786,12 @@ def start_raylet(
         f"--labels={labels_json_str}",
         f"--cluster-id={cluster_id}",
     ]
+    if numa_nodes is not None:
+        command = [
+            "numactl",
+            f"--cpunodebind={numa_nodes}",
+            f"--membind={numa_nodes}",
+        ] + command
 
     if is_head_node:
         command.append("--head")

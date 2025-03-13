@@ -1201,6 +1201,7 @@ class Node:
             node_name=self._ray_params.node_name,
             webui=self._webui_url,
             labels=self._get_node_labels(),
+            numa_nodes=self._ray_params.numa_nodes,
         )
         assert ray_constants.PROCESS_TYPE_RAYLET not in self.all_processes
         self.all_processes[ray_constants.PROCESS_TYPE_RAYLET] = [process_info]

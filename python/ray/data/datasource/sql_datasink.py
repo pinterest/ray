@@ -1,4 +1,4 @@
-from typing import Any, Callable, Iterable
+from typing import Callable, Iterable
 
 from ray.data._internal.execution.interfaces import TaskContext
 from ray.data.block import Block, BlockAccessor
@@ -6,7 +6,7 @@ from ray.data.datasource.datasink import Datasink
 from ray.data.datasource.sql_datasource import Connection, _connect
 
 
-class _SQLDatasink(Datasink):
+class _SQLDatasink(Datasink[None]):
 
     _MAX_ROWS_PER_WRITE = 128
 
@@ -18,7 +18,7 @@ class _SQLDatasink(Datasink):
         self,
         blocks: Iterable[Block],
         ctx: TaskContext,
-    ) -> Any:
+    ) -> None:
         with _connect(self.connection_factory) as cursor:
             for block in blocks:
                 block_accessor = BlockAccessor.for_block(block)
@@ -33,5 +33,3 @@ class _SQLDatasink(Datasink):
 
                 if values:
                     cursor.executemany(self.sql, values)
-
-        return "ok"

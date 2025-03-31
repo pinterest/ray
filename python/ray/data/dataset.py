@@ -31,7 +31,7 @@ from ray.air.util.tensor_extensions.utils import _create_possibly_ragged_ndarray
 from ray.data._internal.block_list import BlockList
 from ray.data._internal.compute import ComputeStrategy
 from ray.data._internal.delegating_block_builder import DelegatingBlockBuilder
-from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+from ray.data.datasource.iceberg_datasink import IcebergDatasink
 from ray.data._internal.equalize import _equalize
 from ray.data._internal.execution.interfaces import RefBundle
 from ray.data._internal.execution.legacy_compat import _block_list_to_bundles

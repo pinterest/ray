@@ -35,9 +35,6 @@ from ray.data.datasource.iceberg_datasink import IcebergDatasink
 from ray.data._internal.equalize import _equalize
 from ray.data._internal.execution.interfaces import RefBundle
 from ray.data._internal.execution.legacy_compat import _block_list_to_bundles
-from ray.data._internal.execution.interfaces.ref_bundle import (
-    _ref_bundles_iterator_to_block_refs_list,
-)
 from ray.data._internal.execution.util import memory_string
 from ray.data._internal.iterator.iterator_impl import DataIteratorImpl
 from ray.data._internal.iterator.stream_split_iterator import StreamSplitDataIterator

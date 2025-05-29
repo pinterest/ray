@@ -1,7 +1,7 @@
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 from ray._private.ray_constants import env_bool, env_integer
 from ray.util.annotations import DeveloperAPI
@@ -224,6 +224,8 @@ class DataContext:
             execution starts.
         s3_try_create_dir: If ``True``, try to create directories on S3 when a write
             call is made with a S3 URI.
+        custom_autoscaler: Reference to a class that will override DefaultAutoscaler. If `None`,
+            DefaultAutoscaler will be used.
     """
 
     target_max_block_size: int = DEFAULT_TARGET_MAX_BLOCK_SIZE
@@ -269,6 +271,7 @@ class DataContext:
     )
     print_on_execution_start: bool = True
     s3_try_create_dir: bool = DEFAULT_S3_TRY_CREATE_DIR
+    custom_autoscaler: Optional[Type[Any]] = None
 
     def __post_init__(self):
         # The additonal ray remote args that should be added to

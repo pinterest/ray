@@ -57,21 +57,6 @@ class BackPressureAwareAutoscaler(Autoscaler):
         op_state: "OpState",
     ):
         if op.name in self._operators_with_terminated_scaling:
-            print(f"Scaling has stopped for: [{op.name}], fixed at {actor_pool.current_size()} actors.")
-            return False
-
-        print(f"[{op.name}] has {actor_pool.current_size()} actors")
-
-        self.log_operator_metrics(op, op_state)
-
-        now = time.time()
-        if now - self._last_actor_pool_scale_up_time < self.MIN_GAP_BETWEEN_ACTOR_POOL_SCALE_UPS:
-            print("TOO SOON TO SCALE AGAIN")
-            return False
-
-        # Do not scale up, if the op is completed or no more inputs are coming.
-        if op.completed() or (op._inputs_complete and op.internal_queue_size() == 0):
-            print(f"IN QUEUE IS EMPTY, {op.name}")
             return False
 
         if actor_pool.current_size() < actor_pool.min_size():
@@ -79,7 +64,6 @@ class BackPressureAwareAutoscaler(Autoscaler):
             return True
         elif actor_pool.current_size() >= actor_pool.max_size():
             # Do not scale up, if the actor pool is already at max size.
-            print("HIT MAX ACTOR POOL SIZE", {op.name})
             return False
 
         # Do not scale up, if the op does not have more resources.
@@ -91,15 +75,27 @@ class BackPressureAwareAutoscaler(Autoscaler):
             print(f"ALREADY ENOUGH FREE SLOTS, {op.name}")
             return False
 
+        now = time.time()
+        if now - self._last_actor_pool_scale_up_time < self.MIN_GAP_BETWEEN_ACTOR_POOL_SCALE_UPS:
+            return False
+
+        # Do not scale up, if the op is completed or no more inputs are coming.
+        if op.completed() or (op._inputs_complete and op.internal_queue_size() == 0):
+            print(f"IN QUEUE IS EMPTY, {op.name}")
+            return False
+
         # Determine whether to scale up based on the outqueue size
         outqueue_size = len(op_state.outqueue)
         should_scale_up = outqueue_size < self.MAX_OUTPUT_QUEUE_SIZE
         print(f"SCALE UP DECISION: {should_scale_up} , because outqueue size is {outqueue_size}")
 
         if should_scale_up:
+            print(f"Scaling up, [{op.name}] has {actor_pool.current_size()} actors")
+            self.log_operator_metrics(op, op_state)
             return True
         else:
             self._operators_with_terminated_scaling.add(op.name)
+            print(f"Scaling has stopped for: [{op.name}], fixed at {actor_pool.current_size()} actors.")
             return False
 
     def _try_scale_up_actor_pool(self):
@@ -139,12 +135,12 @@ class BackPressureAwareAutoscaler(Autoscaler):
         if now - self._last_request_time < self.MIN_GAP_BETWEEN_AUTOSCALING_REQUESTS:
             return
 
-        # Scale up the cluster, if no ops are allowed to run, but there are still data
-        # in the input queues.
-        no_runnable_op = all(op_state._scheduling_status.runnable is False for _, op_state in self._topology.items())
-        any_has_input = any(op_state.num_queued() > 0 for _, op_state in self._topology.items())
-        if not (no_runnable_op and any_has_input):
-            return
+        # # Scale up the cluster, if no ops are allowed to run, but there are still data
+        # # in the input queues.
+        # no_runnable_op = all(op_state._scheduling_status.runnable is False for _, op_state in self._topology.items())
+        # any_has_input = any(op_state.num_queued() > 0 for _, op_state in self._topology.items())
+        # if not (no_runnable_op and any_has_input):
+        #     return
 
         self._last_request_time = now
 

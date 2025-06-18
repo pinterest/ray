@@ -32,12 +32,13 @@ class BackPressureAwareAutoscaler(Autoscaler):
         resource_manager: "ResourceManager",
         execution_id: str,
     ):
-        print("INITIALIZE BackPressureAwareAutoscaler!!!!!!!!!!!!!")
+        print("INITIALIZE BackPressureAwareAutoscaler V5")
 
         # Last time when a request was sent to Ray's autoscaler.
         self._last_request_time = 0
         self._last_actor_pool_scale_up_time = 0
         self._operators_with_terminated_scaling = set()
+        self.resource_manager = resource_manager
 
         super().__init__(topology, resource_manager, execution_id)
 
@@ -47,8 +48,8 @@ class BackPressureAwareAutoscaler(Autoscaler):
 
     def log_operator_metrics(self, op, op_state) -> None:
         metrics = op.metrics
-        print(f"In Queue size: {sum(len(q) for q in op_state.inqueues)}, [{op.name}]")
-        print(f"Out Queue size: {len(op_state.outqueue)}, [{op.name}]\n")
+        # print(f"In Queue size: {sum(len(q) for q in op_state.inqueues)}, [{op.name}]")
+        # print(f"Out Queue size: {len(op_state.outqueue)}, [{op.name}]\n")
 
     def _actor_pool_should_scale_up(
         self,
@@ -56,6 +57,13 @@ class BackPressureAwareAutoscaler(Autoscaler):
         op: "PhysicalOperator",
         op_state: "OpState",
     ):
+        print(f"GLOBAL LIMITS: {self.resource_manager.get_global_limits()}")
+        print(f"GLOBAL USAGE: {self.resource_manager.get_global_usage()}")
+        print(f"RESERVED MIN RESOUCES: {self.resource_manager._op_resource_allocator._reserved_min_resources}")
+
+        self.resource_manager._debug = True
+        print(f"{op.name} {self.resource_manager.get_op_usage_str(op)}")
+
         if op.name in self._operators_with_terminated_scaling:
             return False
 
@@ -66,13 +74,21 @@ class BackPressureAwareAutoscaler(Autoscaler):
             # Do not scale up, if the actor pool is already at max size.
             return False
 
+        if actor_pool.num_pending_actors() > 0:
+            # Do not scale up, if there is a pending actor to be scheduled.
+            print(f"Do not scale up because num pending actors: {actor_pool.num_pending_actors()}")
+            return False
+
+        # print(f"{op.name} under resource limits: [{op_state._scheduling_status.under_resource_limits}]")
+
         # Do not scale up, if the op does not have more resources.
         if not op_state._scheduling_status.under_resource_limits:
-            print(f"OUT OF RESOURCES, {op.name}")
+            # print(f"OUT OF RESOURCES, {op.name}")
             return False
+
         # Do not scale up, if the op has enough free slots for the existing inputs.
         if op_state.num_queued() <= actor_pool.num_free_task_slots():
-            print(f"ALREADY ENOUGH FREE SLOTS, {op.name}")
+            # print(f"ALREADY ENOUGH FREE SLOTS, {op.name}")
             return False
 
         now = time.time()
@@ -81,13 +97,13 @@ class BackPressureAwareAutoscaler(Autoscaler):
 
         # Do not scale up, if the op is completed or no more inputs are coming.
         if op.completed() or (op._inputs_complete and op.internal_queue_size() == 0):
-            print(f"IN QUEUE IS EMPTY, {op.name}")
+            # print(f"IN QUEUE IS EMPTY, {op.name}")
             return False
 
         # Determine whether to scale up based on the outqueue size
         outqueue_size = len(op_state.outqueue)
         should_scale_up = outqueue_size < self.MAX_OUTPUT_QUEUE_SIZE
-        print(f"SCALE UP DECISION: {should_scale_up} , because outqueue size is {outqueue_size}")
+        # print(f"SCALE UP DECISION: {should_scale_up} , because outqueue size is {outqueue_size}")
 
         if should_scale_up:
             print(f"Scaling up, [{op.name}] has {actor_pool.current_size()} actors")
@@ -111,7 +127,6 @@ class BackPressureAwareAutoscaler(Autoscaler):
                     )
                     if should_scale_up:
                         now = time.time()
-                        print("UPDATE LAST TIME")
                         self._last_actor_pool_scale_up_time = now
 
                         if actor_pool.scale_up(1) == 0:
@@ -135,12 +150,17 @@ class BackPressureAwareAutoscaler(Autoscaler):
         if now - self._last_request_time < self.MIN_GAP_BETWEEN_AUTOSCALING_REQUESTS:
             return
 
-        # # Scale up the cluster, if no ops are allowed to run, but there are still data
-        # # in the input queues.
-        # no_runnable_op = all(op_state._scheduling_status.runnable is False for _, op_state in self._topology.items())
-        # any_has_input = any(op_state.num_queued() > 0 for _, op_state in self._topology.items())
-        # if not (no_runnable_op and any_has_input):
-        #     return
+        # Scale up the cluster, if no ops are allowed to run, but there are still data
+        # in the input queues.
+        no_runnable_op = all(op_state._scheduling_status.runnable is False for _, op_state in self._topology.items())
+        any_has_input = any(op_state.num_queued() > 0 for _, op_state in self._topology.items())
+
+        # print(f"No runnable op  - {no_runnable_op}")
+        # print(f"Any has input  - {any_has_input}")
+
+        if not (no_runnable_op and any_has_input):
+            # print("NODE AUTOSCALER RETURNS EARLY")
+            return
 
         self._last_request_time = now
 
@@ -158,6 +178,9 @@ class BackPressureAwareAutoscaler(Autoscaler):
 
         for op, state in self._topology.items():
             per_task_resource = op.incremental_resource_usage()
+
+            # print(f"{op.name} per task resource: {per_task_resource}")
+
             task_bundle = to_bundle(per_task_resource)
             resource_request.extend([task_bundle] * op.num_active_tasks())
             # Only include incremental resource usage for ops that are ready for
@@ -166,6 +189,8 @@ class BackPressureAwareAutoscaler(Autoscaler):
                 # TODO(Clark): Scale up more aggressively by adding incremental resource
                 # usage for more than one bundle in the queue for this op?
                 resource_request.append(task_bundle)
+
+            # print(f"{op.name} requesting resource: {resource_request}")
 
         self._send_resource_request(resource_request)
 

@@ -538,16 +538,6 @@ class _StatsActor:
         self.iter_finalize_batch_s.set(stats.iter_finalize_batch_s.get(), tags)
         self.streaming_split_coordinator_s.set(stats.streaming_split_coordinator_s.get(), tags)
 
-    def register_dataset(
-        self,
-        job_id: str,
-        dataset_tag: str,
-        operator_tags: List[str],
-        topology: Topology,
-        data_context: DataContext,
-    ):
-        start_time = time.time()
-
     def clear_execution_metrics(self, dataset_tag: str, operator_tags: List[str]):
         for operator_tag in operator_tags:
             tags = self._create_tags(dataset_tag, operator_tag)
@@ -589,7 +579,15 @@ class _StatsActor:
         self.iter_finalize_batch_s.set(0, tags)
         self.streaming_split_coordinator_s.set(0, tags)
 
-    def register_dataset(self, dataset_tag: str, operator_tags: List[str]):
+    def register_dataset(
+        self,
+        job_id: str,
+        dataset_tag: str,
+        operator_tags: List[str],
+        topology: Topology,
+        data_context: DataContext,
+    ):
+        start_time = time.time()
         self.datasets[dataset_tag] = {
             "job_id": job_id,
             "state": DatasetState.RUNNING.name,

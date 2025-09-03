@@ -529,7 +529,7 @@ DATA_GRAFANA_PANELS = [
         stack=True,
     ),
     Panel(
-        id=48,
+        id=49,
         title="Task CPU Time",
         description="Time spent using CPU within a running task.",
         unit="seconds",

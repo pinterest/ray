@@ -133,6 +133,7 @@ ray_cc_library(
         "@com_google_googletest//:gtest_prod",
         "@com_google_protobuf//:protobuf",
         "@nlohmann_json",
+        "@zstd//:libzstd",
     ],
 )
 
@@ -226,6 +227,7 @@ ray_cc_library(
         "//src/ray/thirdparty:sha256",
         "@boost//:asio",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@zstd//:libzstd",
     ],
 )
 

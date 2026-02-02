@@ -65,8 +65,12 @@ def test_limit_pushdown_conservative(ray_start_regular_shared_2_cpus):
         ds, "Read[ReadRange] -> Limit[limit=1] -> MapRows[Map(f1)]", [{"id": 0}]
     )
 
-    # Test 3: Limit should push through MapBatches operations
-    ds = ray.data.range(100, override_num_blocks=100).map_batches(f2).limit(1)
+    # Test 3: Limit should push through MapBatches operations that does not modifiy row count
+    ds = (
+        ray.data.range(100, override_num_blocks=100)
+        .map_batches(f2, udf_modifying_row_count=False)
+        .limit(1)
+    )
     _check_valid_plan_and_result(
         ds,
         "Read[ReadRange] -> Limit[limit=1] -> MapBatches[MapBatches(f2)]",
@@ -401,7 +405,7 @@ def test_limit_pushdown_union_maps_projects(ray_start_regular_shared_2_cpus):
     # Left branch.
     left = (
         ray.data.range(30)
-        .map_batches(lambda b: b)
+        .map_batches(lambda b: b, udf_modifying_row_count=False)
         .map(lambda r: {"id": r["id"]})
         .select_columns(["id"])
     )
@@ -409,7 +413,7 @@ def test_limit_pushdown_union_maps_projects(ray_start_regular_shared_2_cpus):
     # Right branch with shifted ids.
     right = (
         ray.data.range(30)
-        .map_batches(lambda b: b)
+        .map_batches(lambda b: b, udf_modifying_row_count=False)
         .map(lambda r: {"id": r["id"] + 100})
         .select_columns(["id"])
     )
@@ -529,6 +533,18 @@ def test_limit_pushdown_udf_modifying_row_count_with_map_batches(
         expected_plan,
         [{"id": i} for i in range(10)],
     )
+
+
+def test_does_not_pushdown_limit_past_map_batches_by_default(
+    ray_start_regular_shared_2_cpus,
+):
+    def duplicate_id(batch):
+        yield {"data": list(batch["id"]) * 2}
+
+    # If the optimizer incorrectly pushes the limit past the map operator, then the
+    # returned count is 2.
+    num_rows = ray.data.range(1).map_batches(duplicate_id).limit(1).count()
+    assert num_rows == 1, num_rows
 
 
 if __name__ == "__main__":

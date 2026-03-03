@@ -1,4 +1,4 @@
-[project]
+[ project]
 requires-python = ">=3.9"
 
 [tool.ruff]

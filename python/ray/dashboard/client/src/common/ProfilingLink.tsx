@@ -150,6 +150,7 @@ export const CpuProfilerButton = ({
   const [native, setNative] = useState(false);
   const [rate, setRate] = useState(100);
   const [open, setOpen] = useState(false);
+  const [perfettoConfirmOpen, setPerfettoConfirmOpen] = useState(false);
 
   const handleOpen = () => {
     setOpen(true);
@@ -171,6 +172,60 @@ export const CpuProfilerButton = ({
     const absoluteUrl = `${window.location.origin}/${profileUrl}`;
     const speedscopeUrl = `/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent(absoluteUrl)}`;
     window.open(speedscopeUrl, "_blank");
+    handleClose();
+  };
+
+  const openInPerfetto = async () => {
+    const profileUrl = buildProfileUrl();
+    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
+
+    // Fetch trace data from dashboard API
+    const response = await fetch(absoluteUrl);
+    if (!response.ok) {
+      console.error("Failed to fetch profile data");
+      return;
+    }
+    const buffer = await response.arrayBuffer();
+
+    // Open Perfetto UI
+    const PERFETTO_UI_URL = "https://ui.perfetto.dev";
+    const perfettoWindow = window.open(PERFETTO_UI_URL);
+    if (!perfettoWindow) {
+      alert("Popup blocked. Please allow popups for this site.");
+      return;
+    }
+
+    // Wait for Perfetto to be ready (PING/PONG handshake)
+    const onPerfettoReady = (event: MessageEvent) => {
+      if (event.data !== "PONG") return;
+      if (event.origin !== PERFETTO_UI_URL) return;
+
+      window.removeEventListener("message", onPerfettoReady);
+
+      // Send trace data to Perfetto
+      perfettoWindow.postMessage(
+        {
+          perfetto: {
+            buffer: buffer,
+            title: "Ray CPU Profile",
+            fileName: "profile.json",
+          },
+        },
+        PERFETTO_UI_URL,
+      );
+    };
+
+    window.addEventListener("message", onPerfettoReady);
+
+    // Send PING to initiate handshake (with retry)
+    const sendPing = () => {
+      perfettoWindow.postMessage("PING", PERFETTO_UI_URL);
+    };
+
+    const pingInterval = setInterval(sendPing, 100);
+    setTimeout(() => clearInterval(pingInterval), 10000);
+
+    setPerfettoConfirmOpen(false);
     handleClose();
   };
 
@@ -251,14 +306,24 @@ export const CpuProfilerButton = ({
             Cancel
           </Button>
           {format === "chrometrace" ? (
-            <Button
-              color="primary"
-              variant="text"
-              onClick={openInSpeedscope}
-              style={{ textTransform: "capitalize" }}
-            >
-              Open&nbsp;in&nbsp;Viewer
-            </Button>
+            <>
+              <Button
+                color="primary"
+                variant="text"
+                onClick={openInSpeedscope}
+                style={{ textTransform: "capitalize" }}
+              >
+                Open&nbsp;in&nbsp;Viewer
+              </Button>
+              <Button
+                color="primary"
+                variant="text"
+                onClick={() => setPerfettoConfirmOpen(true)}
+                style={{ textTransform: "capitalize" }}
+              >
+                Open&nbsp;in&nbsp;Perfetto
+              </Button>
+            </>
           ) : null}
           <Button
             color="primary"
@@ -269,6 +334,46 @@ export const CpuProfilerButton = ({
             <Link href={buildProfileUrl()} rel="noreferrer" target="_blank">
               {format === "chrometrace" ? "Download" : "Generate\u00A0report"}
             </Link>
+          </Button>
+        </Box>
+      </Dialog>
+
+      <Dialog
+        open={perfettoConfirmOpen}
+        onClose={() => setPerfettoConfirmOpen(false)}
+      >
+        <DialogTitle>Open in Perfetto UI</DialogTitle>
+        <DialogContent>
+          <Typography>
+            This will open <strong>ui.perfetto.dev</strong> (hosted by Google)
+            and send your CPU profile data to that site.
+          </Typography>
+          <Typography style={{ marginTop: "8px" }}>
+            According to Perfetto's documentation, the UI is client-only and
+            trace data stays in your browser. However, you are trusting
+            third-party JavaScript.
+          </Typography>
+          <Typography style={{ marginTop: "8px", fontWeight: "bold" }}>
+            Do you want to continue?
+          </Typography>
+        </DialogContent>
+        <Box
+          sx={{ padding: "12px", display: "flex", justifyContent: "flex-end" }}
+        >
+          <Button
+            onClick={() => setPerfettoConfirmOpen(false)}
+            variant="text"
+            sx={{ textTransform: "capitalize", color: "#5F6469" }}
+          >
+            Cancel
+          </Button>
+          <Button
+            color="primary"
+            variant="text"
+            onClick={openInPerfetto}
+            style={{ textTransform: "capitalize" }}
+          >
+            Open Perfetto
           </Button>
         </Box>
       </Dialog>

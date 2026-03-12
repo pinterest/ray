@@ -119,19 +119,26 @@ class CpuProfilingManager:
             return True, decode(stdout)
 
     async def cpu_profile(
-        self, pid: int, format="flamegraph", duration: float = 5, native: bool = False
+        self,
+        pid: int,
+        format="flamegraph",
+        duration: float = 5,
+        native: bool = False,
+        rate: int = 100,
     ) -> (bool, str):
         """
         Perform CPU profiling on a specified process.
 
         Args:
             pid: The process ID (PID) of the target process to be profiled.
-                format (str, optional): The format of the CPU profile output.
+            format (str, optional): The format of the CPU profile output.
+                Supported formats: flamegraph, raw, speedscope, chrometrace.
                 Default is "flamegraph".
             duration (float, optional): The duration of the profiling
                 session in seconds. Default is 5 seconds.
             native (bool, optional): If True, includes native (C/C++) stack frames.
                 Default is False.
+            rate (int, optional): Sampling rate in Hz. Default is 100.
 
         Returns:
             Tuple[bool, str]: A tuple containing a boolean indicating the success
@@ -142,15 +149,17 @@ class CpuProfilingManager:
         if pyspy is None:
             return False, "Failed to execute: py-spy is not installed"
 
-        if format not in ("flamegraph", "raw", "speedscope"):
+        if format not in ("flamegraph", "raw", "speedscope", "chrometrace"):
             return (
                 False,
                 f"Failed to execute: Invalid format {format}, "
-                + "must be [flamegraph, raw, speedscope]",
+                + "must be [flamegraph, raw, speedscope, chrometrace]",
             )
 
         if format == "flamegraph":
             extension = "svg"
+        elif format == "chrometrace":
+            extension = "json"
         else:
             extension = "txt"
         profile_file_path = (
@@ -167,6 +176,8 @@ class CpuProfilingManager:
             str(duration),
             "-f",
             format,
+            "-r",
+            str(rate),
         ]
         if sys.platform == "linux" and native:
             cmd.append("--native")

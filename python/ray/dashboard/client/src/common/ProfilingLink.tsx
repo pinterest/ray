@@ -136,6 +136,171 @@ export const CpuProfilingLink = ({
   );
 };
 
+type CpuProfilingButtonProps = {
+  profilerUrl: string;
+  type?: string | null;
+};
+
+export const CpuProfilerButton = ({
+  profilerUrl,
+  type,
+}: CpuProfilingButtonProps) => {
+  const [duration, setDuration] = useState(5);
+  const [format, setFormat] = useState("flamegraph");
+  const [native, setNative] = useState(false);
+  const [rate, setRate] = useState(100);
+  const [open, setOpen] = useState(false);
+
+  const handleOpen = () => {
+    setOpen(true);
+  };
+
+  const handleClose = () => {
+    setOpen(false);
+  };
+
+  const buildProfileUrl = () => {
+    return (
+      `${profilerUrl}&format=${format}&duration=${duration}` +
+      `&native=${native ? "1" : "0"}&rate=${rate}`
+    );
+  };
+
+  const openInPerfetto = () => {
+    const fullUrl = `${window.location.origin}/${buildProfileUrl()}`;
+    const perfettoUrl = `https://ui.perfetto.dev/#!/?url=${encodeURIComponent(fullUrl)}`;
+    window.open(perfettoUrl, "_blank");
+    handleClose();
+  };
+
+  return (
+    <div>
+      <Link
+        onClick={handleOpen}
+        aria-label="CPU Profiling"
+        sx={{ cursor: "pointer" }}
+      >
+        CPU&nbsp;Profiling{type ? ` (${type})` : ""}
+      </Link>
+
+      <Dialog open={open} onClose={handleClose}>
+        <DialogTitle>CPU Profiling Config</DialogTitle>
+        <DialogContent>
+          <InputLabel id="cpu-format-label">Format</InputLabel>
+          <Select
+            labelId="cpu-format-label"
+            id="cpu-format"
+            value={format}
+            aria-label={format}
+            onChange={(e) => setFormat(e.target.value as string)}
+            fullWidth
+            style={{ marginBottom: "12px" }}
+          >
+            <MenuItem value="flamegraph">Flamegraph (SVG)</MenuItem>
+            <MenuItem value="chrometrace">Chrome Trace (Timeline)</MenuItem>
+            <MenuItem value="speedscope">Speedscope</MenuItem>
+          </Select>
+          <TextField
+            label="Duration (seconds)"
+            type="number"
+            value={duration !== null ? duration : ""}
+            onChange={(e) => setDuration(parseInt(e.target.value, 10))}
+            inputProps={{ min: 1, max: 60 }}
+            required
+            fullWidth
+            style={{ marginBottom: "12px" }}
+          />
+          <TextField
+            label="Sampling Rate (Hz)"
+            type="number"
+            value={rate !== null ? rate : ""}
+            onChange={(e) => setRate(parseInt(e.target.value, 10))}
+            inputProps={{ min: 1, max: 1000 }}
+            fullWidth
+            style={{ marginBottom: "12px" }}
+          />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={native}
+                onChange={(e) => setNative(e.target.checked)}
+              />
+            }
+            label={
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span style={{ marginRight: "4px" }}>Native</span>
+                <HelpInfo>
+                  <Typography>
+                    Track native (C/C++) stack frames. Only available on Linux.
+                    Refer to py-spy documentation for more details.
+                  </Typography>
+                </HelpInfo>
+              </div>
+            }
+          />
+        </DialogContent>
+        <Box
+          sx={{ padding: "12px", display: "flex", justifyContent: "flex-end" }}
+        >
+          <Button
+            onClick={handleClose}
+            variant="text"
+            sx={{ textTransform: "capitalize", color: "#5F6469" }}
+          >
+            Cancel
+          </Button>
+          {format === "chrometrace" ? (
+            <Button
+              color="primary"
+              variant="text"
+              onClick={openInPerfetto}
+              style={{ textTransform: "capitalize" }}
+            >
+              Open&nbsp;in&nbsp;Perfetto
+            </Button>
+          ) : null}
+          <Button
+            color="primary"
+            variant="text"
+            onClick={handleClose}
+            style={{ textTransform: "capitalize" }}
+          >
+            <Link href={buildProfileUrl()} rel="noreferrer" target="_blank">
+              {format === "chrometrace" ? "Download" : "Generate\u00A0report"}
+            </Link>
+          </Button>
+        </Box>
+      </Dialog>
+    </div>
+  );
+};
+
+export const CpuProfilingButton = ({
+  pid,
+  nodeId,
+  type = "",
+}: CpuProfilingLinkProps) => {
+  if (!pid || !nodeId) {
+    return <div></div>;
+  }
+  const profilerUrl = `worker/cpu_profile?pid=${pid}&node_id=${nodeId}`;
+
+  return <CpuProfilerButton profilerUrl={profilerUrl} type={type} />;
+};
+
+export const TaskCpuProfilingButton = ({
+  taskId,
+  attemptNumber,
+  nodeId,
+}: TaskProfilingStackTraceProps) => {
+  if (!taskId) {
+    return null;
+  }
+  const profilerUrl = `task/cpu_profile?task_id=${taskId}&attempt_number=${attemptNumber}&node_id=${nodeId}`;
+
+  return <CpuProfilerButton profilerUrl={profilerUrl} />;
+};
+
 export const ProfilerButton = ({
   profilerUrl,
   type,

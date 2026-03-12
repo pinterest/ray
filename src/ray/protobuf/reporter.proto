@@ -36,6 +36,8 @@ message CpuProfilingRequest {
   optional uint32 duration = 3;
   // If using native flag for py-spy
   optional bool native = 4;
+  // Sampling rate in Hz (default 100)
+  optional uint32 rate = 5;
 }
 
 message CpuProfilingReply {

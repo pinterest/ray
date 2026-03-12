@@ -510,9 +510,10 @@ class ReporterAgent(
         duration = request.duration
         format = request.format
         native = request.native
+        rate = request.rate if request.rate else 100
         p = CpuProfilingManager(self._log_dir)
         success, output = await p.cpu_profile(
-            pid, format=format, duration=duration, native=native
+            pid, format=format, duration=duration, native=native, rate=rate
         )
         return reporter_pb2.CpuProfilingReply(output=output, success=success)
 

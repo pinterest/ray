@@ -343,6 +343,7 @@ class ReportHead(SubprocessModule):
         if duration_s > 60:
             raise ValueError(f"The max duration allowed is 60 seconds: {duration_s}.")
         format = req.query.get("format", "flamegraph")
+        rate = int(req.query.get("rate", 100))
 
         # Default not using `--native` for profiling
         native = req.query.get("native", False) == "1"
@@ -367,7 +368,7 @@ class ReportHead(SubprocessModule):
 
         reply = await reporter_stub.CpuProfiling(
             reporter_pb2.CpuProfilingRequest(
-                pid=pid, duration=duration_s, format=format, native=native
+                pid=pid, duration=duration_s, format=format, native=native, rate=rate
             )
         )
 
@@ -393,6 +394,17 @@ class ReportHead(SubprocessModule):
         logger.info("Returning profiling response, size {}".format(len(reply.output)))
 
         task_ids_in_a_worker = await self.get_task_ids_running_in_a_worker(worker_id)
+
+        # Handle chrometrace format (JSON) differently
+        if format == "chrometrace":
+            return aiohttp.web.Response(
+                body=reply.output,
+                headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
+
         return aiohttp.web.Response(
             body=(
                 '<p style="color: #E37400;">{} {} </br> </p> </br>'.format(
@@ -504,6 +516,7 @@ class ReportHead(SubprocessModule):
         if duration_s > 60:
             raise ValueError(f"The max duration allowed is 60 seconds: {duration_s}.")
         format = req.query.get("format", "flamegraph")
+        rate = int(req.query.get("rate", 100))
 
         # Default not using `--native` for profiling
         native = req.query.get("native", False) == "1"
@@ -512,21 +525,27 @@ class ReportHead(SubprocessModule):
         )
         reply = await reporter_stub.CpuProfiling(
             reporter_pb2.CpuProfilingRequest(
-                pid=pid, duration=duration_s, format=format, native=native
+                pid=pid, duration=duration_s, format=format, native=native, rate=rate
             )
         )
         if reply.success:
             logger.info(
                 "Returning profiling response, size {}".format(len(reply.output))
             )
-            return aiohttp.web.Response(
-                body=reply.output,
-                headers={
-                    "Content-Type": (
-                        "image/svg+xml" if format == "flamegraph" else "text/plain"
-                    )
-                },
-            )
+            # Determine content type based on format
+            if format == "flamegraph":
+                content_type = "image/svg+xml"
+            elif format == "chrometrace":
+                content_type = "application/json"
+            else:
+                content_type = "text/plain"
+
+            headers = {"Content-Type": content_type}
+            # Add CORS headers for chrometrace to allow Perfetto UI to fetch
+            if format == "chrometrace":
+                headers["Access-Control-Allow-Origin"] = "*"
+
+            return aiohttp.web.Response(body=reply.output, headers=headers)
         else:
             return aiohttp.web.HTTPInternalServerError(text=reply.output)
 

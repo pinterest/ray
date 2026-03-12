@@ -166,10 +166,10 @@ export const CpuProfilerButton = ({
     );
   };
 
-  const openInPerfetto = () => {
-    const fullUrl = `${window.location.origin}/${buildProfileUrl()}`;
-    const perfettoUrl = `https://ui.perfetto.dev/#!/?url=${encodeURIComponent(fullUrl)}`;
-    window.open(perfettoUrl, "_blank");
+  const openInSpeedscope = () => {
+    const profileUrl = buildProfileUrl();
+    const speedscopeUrl = `/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent("/" + profileUrl)}`;
+    window.open(speedscopeUrl, "_blank");
     handleClose();
   };
 
@@ -253,10 +253,10 @@ export const CpuProfilerButton = ({
             <Button
               color="primary"
               variant="text"
-              onClick={openInPerfetto}
+              onClick={openInSpeedscope}
               style={{ textTransform: "capitalize" }}
             >
-              Open&nbsp;in&nbsp;Perfetto
+              Open&nbsp;in&nbsp;Viewer
             </Button>
           ) : null}
           <Button

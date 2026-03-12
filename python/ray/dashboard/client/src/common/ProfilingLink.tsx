@@ -168,7 +168,8 @@ export const CpuProfilerButton = ({
 
   const openInSpeedscope = () => {
     const profileUrl = buildProfileUrl();
-    const speedscopeUrl = `/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent("/" + profileUrl)}`;
+    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
+    const speedscopeUrl = `/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent(absoluteUrl)}`;
     window.open(speedscopeUrl, "_blank");
     handleClose();
   };

@@ -171,25 +171,32 @@ export const CpuProfilerButton = ({
     );
   };
 
+  const getBasePath = () => {
+    return window.location.pathname.replace(/\/$/, "");
+  };
+
   const openInSpeedscope = () => {
     const profileUrl = buildProfileUrl();
-    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
-    const speedscopeUrl = `/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent(absoluteUrl)}`;
+    const basePath = getBasePath();
+    const absoluteUrl = `${window.location.origin}${basePath}/${profileUrl}`;
+    const speedscopeUrl = `${basePath}/speedscope-1.5.3/index.html#profileURL=${encodeURIComponent(absoluteUrl)}`;
     window.open(speedscopeUrl, "_blank");
     handleClose();
   };
 
   const openInTraceViewer = () => {
     const profileUrl = buildProfileUrl();
-    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
-    const traceViewerUrl = `/trace-viewer/index.html#traceURL=${encodeURIComponent(absoluteUrl)}`;
+    const basePath = getBasePath();
+    const absoluteUrl = `${window.location.origin}${basePath}/${profileUrl}`;
+    const traceViewerUrl = `${basePath}/trace-viewer/index.html#traceURL=${encodeURIComponent(absoluteUrl)}`;
     window.open(traceViewerUrl, "_blank");
     handleClose();
   };
 
   const openInPerfetto = async () => {
     const profileUrl = buildProfileUrl();
-    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
+    const basePath = getBasePath();
+    const absoluteUrl = `${window.location.origin}${basePath}/${profileUrl}`;
 
     // Fetch trace data from dashboard API
     const response = await fetch(absoluteUrl);
@@ -242,7 +249,7 @@ export const CpuProfilerButton = ({
   };
 
   return (
-    <div>
+    <React.Fragment>
       <Link
         onClick={handleOpen}
         aria-label="CPU Profiling"
@@ -380,7 +387,7 @@ export const CpuProfilerButton = ({
             Cancel
           </Button>
           {format === "chrometrace" ? (
-            <>
+            <React.Fragment>
               <Button
                 color="primary"
                 variant="text"
@@ -405,7 +412,7 @@ export const CpuProfilerButton = ({
               >
                 Open&nbsp;in&nbsp;Perfetto
               </Button>
-            </>
+            </React.Fragment>
           ) : null}
           <Button
             color="primary"
@@ -459,7 +466,7 @@ export const CpuProfilerButton = ({
           </Button>
         </Box>
       </Dialog>
-    </div>
+    </React.Fragment>
   );
 };
 
@@ -509,7 +516,7 @@ export const ProfilerButton = ({
   };
 
   return (
-    <div>
+    <React.Fragment>
       <Link
         onClick={handleOpen}
         aria-label="Memory Profiling"
@@ -635,7 +642,7 @@ export const ProfilerButton = ({
           </Button>
         </Box>
       </Dialog>
-    </div>
+    </React.Fragment>
   );
 };
 

@@ -125,6 +125,9 @@ class CpuProfilingManager:
         duration: float = 5,
         native: bool = False,
         rate: int = 100,
+        gil: bool = False,
+        idle: bool = False,
+        nonblocking: bool = False,
     ) -> (bool, str):
         """
         Perform CPU profiling on a specified process.
@@ -149,11 +152,11 @@ class CpuProfilingManager:
         if pyspy is None:
             return False, "Failed to execute: py-spy is not installed"
 
-        if format not in ("flamegraph", "raw", "speedscope", "chrometrace"):
+        if format not in ("flamegraph", "raw", "chrometrace"):
             return (
                 False,
                 f"Failed to execute: Invalid format {format}, "
-                + "must be [flamegraph, raw, speedscope, chrometrace]",
+                + "must be [flamegraph, raw, chrometrace]",
             )
 
         if format == "flamegraph":
@@ -181,6 +184,15 @@ class CpuProfilingManager:
         ]
         if sys.platform == "linux" and native:
             cmd.append("--native")
+        # Always show thread ids in output
+        cmd.append("--threads")
+        # Optional py-spy flags
+        if gil:
+            cmd.append("--gil")
+        if idle:
+            cmd.append("--idle")
+        if nonblocking:
+            cmd.append("--nonblocking")
         if await _can_passwordless_sudo():
             cmd = ["sudo", "-n"] + cmd
         process = await asyncio.create_subprocess_exec(

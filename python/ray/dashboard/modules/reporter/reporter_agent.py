@@ -511,9 +511,20 @@ class ReporterAgent(
         format = request.format
         native = request.native
         rate = request.rate if request.rate else 100
+        # py-spy options
+        gil = request.gil if request.gil else False
+        idle = request.idle if request.idle else False
+        nonblocking = request.nonblocking if request.nonblocking else False
         p = CpuProfilingManager(self._log_dir)
         success, output = await p.cpu_profile(
-            pid, format=format, duration=duration, native=native, rate=rate
+            pid,
+            format=format,
+            duration=duration,
+            native=native,
+            rate=rate,
+            gil=gil,
+            idle=idle,
+            nonblocking=nonblocking,
         )
         return reporter_pb2.CpuProfilingReply(output=output, success=success)
 

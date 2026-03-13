@@ -347,6 +347,10 @@ class ReportHead(SubprocessModule):
 
         # Default not using `--native` for profiling
         native = req.query.get("native", False) == "1"
+        # py-spy options
+        gil = req.query.get("gil", False) == "1"
+        idle = req.query.get("idle", False) == "1"
+        nonblocking = req.query.get("nonblocking", False) == "1"
         addrs = await self._get_stub_address_by_node_id(NodeID.from_hex(node_id_hex))
         if not addrs:
             raise aiohttp.web.HTTPInternalServerError(
@@ -368,7 +372,14 @@ class ReportHead(SubprocessModule):
 
         reply = await reporter_stub.CpuProfiling(
             reporter_pb2.CpuProfilingRequest(
-                pid=pid, duration=duration_s, format=format, native=native, rate=rate
+                pid=pid,
+                duration=duration_s,
+                format=format,
+                native=native,
+                rate=rate,
+                gil=gil,
+                idle=idle,
+                nonblocking=nonblocking,
             )
         )
 
@@ -520,12 +531,23 @@ class ReportHead(SubprocessModule):
 
         # Default not using `--native` for profiling
         native = req.query.get("native", False) == "1"
+        # py-spy options
+        gil = req.query.get("gil", False) == "1"
+        idle = req.query.get("idle", False) == "1"
+        nonblocking = req.query.get("nonblocking", False) == "1"
         logger.info(
             f"Sending CPU profiling request to {build_address(ip, grpc_port)}, pid {pid}, with native={native}"
         )
         reply = await reporter_stub.CpuProfiling(
             reporter_pb2.CpuProfilingRequest(
-                pid=pid, duration=duration_s, format=format, native=native, rate=rate
+                pid=pid,
+                duration=duration_s,
+                format=format,
+                native=native,
+                rate=rate,
+                gil=gil,
+                idle=idle,
+                nonblocking=nonblocking,
             )
         )
         if reply.success:

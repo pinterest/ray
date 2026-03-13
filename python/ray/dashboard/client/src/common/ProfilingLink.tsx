@@ -149,6 +149,9 @@ export const CpuProfilerButton = ({
   const [format, setFormat] = useState("flamegraph");
   const [native, setNative] = useState(false);
   const [rate, setRate] = useState(100);
+  const [gil, setGil] = useState(false);
+  const [idle, setIdle] = useState(false);
+  const [nonblocking, setNonblocking] = useState(false);
   const [open, setOpen] = useState(false);
   const [perfettoConfirmOpen, setPerfettoConfirmOpen] = useState(false);
 
@@ -163,7 +166,8 @@ export const CpuProfilerButton = ({
   const buildProfileUrl = () => {
     return (
       `${profilerUrl}&format=${format}&duration=${duration}` +
-      `&native=${native ? "1" : "0"}&rate=${rate}`
+      `&native=${native ? "1" : "0"}&rate=${rate}` +
+      `&gil=${gil ? "1" : "0"}&idle=${idle ? "1" : "0"}&nonblocking=${nonblocking ? "1" : "0"}`
     );
   };
 
@@ -262,7 +266,6 @@ export const CpuProfilerButton = ({
           >
             <MenuItem value="flamegraph">Flamegraph (SVG)</MenuItem>
             <MenuItem value="chrometrace">Chrome Trace (Timeline)</MenuItem>
-            <MenuItem value="speedscope">Speedscope</MenuItem>
           </Select>
           <TextField
             label="Duration (seconds)"
@@ -297,6 +300,69 @@ export const CpuProfilerButton = ({
                   <Typography>
                     Track native (C/C++) stack frames. Only available on Linux.
                     Refer to py-spy documentation for more details.
+                  </Typography>
+                </HelpInfo>
+              </div>
+            }
+          />
+          <br />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={gil}
+                onChange={(e) => setGil(e.target.checked)}
+              />
+            }
+            label={
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span style={{ marginRight: "4px" }}>GIL Only</span>
+                <HelpInfo>
+                  <Typography>
+                    Only include traces that are holding on to the GIL (Global
+                    Interpreter Lock). Useful for identifying Python code that
+                    is actively executing.
+                  </Typography>
+                </HelpInfo>
+              </div>
+            }
+          />
+          <br />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={idle}
+                onChange={(e) => setIdle(e.target.checked)}
+              />
+            }
+            label={
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span style={{ marginRight: "4px" }}>Include Idle</span>
+                <HelpInfo>
+                  <Typography>
+                    Include stack traces for idle threads (e.g., threads in
+                    time.sleep() or waiting on I/O). Useful for understanding
+                    the full picture of thread activity.
+                  </Typography>
+                </HelpInfo>
+              </div>
+            }
+          />
+          <br />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={nonblocking}
+                onChange={(e) => setNonblocking(e.target.checked)}
+              />
+            }
+            label={
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span style={{ marginRight: "4px" }}>Non-blocking</span>
+                <HelpInfo>
+                  <Typography>
+                    Don't pause the Python process when collecting samples.
+                    Reduces performance impact but may lead to less accurate
+                    results.
                   </Typography>
                 </HelpInfo>
               </div>

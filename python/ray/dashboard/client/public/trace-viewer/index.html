@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+    <title>Ray Trace Viewer</title>
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        flex-direction: column;
+        display: flex;
+      }
+      body > x-profiling-view {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      body > x-profiling-view > x-timeline-view:focus {
+        outline: 0;
+      }
+      #loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.9);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+        font-family: sans-serif;
+      }
+      #loading-overlay.hidden {
+        display: none;
+      }
+      .loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-bottom: 16px;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      #loading-text {
+        color: #333;
+        font-size: 16px;
+      }
+      #error-text {
+        color: #e74c3c;
+        font-size: 14px;
+        margin-top: 8px;
+        max-width: 80%;
+        text-align: center;
+      }
+    </style>
+    <script src="about_tracing.js"></script>
+  </head>
+  <body>
+    <div id="loading-overlay" class="hidden">
+      <div class="loading-spinner"></div>
+      <div id="loading-text">Loading trace...</div>
+      <div id="error-text"></div>
+    </div>
+    <script>
+      // URL loading support for Ray Dashboard integration
+      (function() {
+        function getTraceUrlFromHash() {
+          const hash = window.location.hash;
+          if (!hash || hash.length <= 1) return null;
+
+          // Support format: #traceURL=<encoded-url>
+          const params = new URLSearchParams(hash.substring(1));
+          const traceUrl = params.get('traceURL');
+          if (traceUrl) return traceUrl;
+
+          // Also support direct URL in hash (like Speedscope)
+          // #profileURL=<encoded-url>
+          const profileUrl = params.get('profileURL');
+          if (profileUrl) return profileUrl;
+
+          return null;
+        }
+
+        function showLoading(message) {
+          const overlay = document.getElementById('loading-overlay');
+          const loadingText = document.getElementById('loading-text');
+          const errorText = document.getElementById('error-text');
+          overlay.classList.remove('hidden');
+          loadingText.textContent = message || 'Loading trace...';
+          errorText.textContent = '';
+        }
+
+        function hideLoading() {
+          const overlay = document.getElementById('loading-overlay');
+          overlay.classList.add('hidden');
+        }
+
+        function showError(message) {
+          const errorText = document.getElementById('error-text');
+          const loadingText = document.getElementById('loading-text');
+          loadingText.textContent = 'Error loading trace';
+          errorText.textContent = message;
+          // Hide spinner but keep overlay
+          const spinner = document.querySelector('.loading-spinner');
+          if (spinner) spinner.style.display = 'none';
+        }
+
+        function loadTraceFromUrl(url) {
+          showLoading('Fetching trace from server...');
+
+          fetch(url)
+            .then(function(response) {
+              if (!response.ok) {
+                throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+              }
+              showLoading('Reading trace data...');
+              return response.text();
+            })
+            .then(function(data) {
+              showLoading('Parsing trace...');
+
+              // Wait for profilingView to be ready
+              function trySetTrace() {
+                if (window.profilingView && window.profilingView.setActiveTrace) {
+                  try {
+                    // Extract filename from URL
+                    const urlParts = url.split('/');
+                    const filename = urlParts[urlParts.length - 1].split('?')[0] || 'trace.json';
+
+                    window.profilingView.setActiveTrace(filename, data);
+                    hideLoading();
+                  } catch (e) {
+                    showError('Failed to parse trace: ' + e.message);
+                  }
+                } else {
+                  // Retry in 100ms
+                  setTimeout(trySetTrace, 100);
+                }
+              }
+              trySetTrace();
+            })
+            .catch(function(error) {
+              showError(error.message);
+            });
+        }
+
+        // Check for URL parameter on page load
+        document.addEventListener('DOMContentLoaded', function() {
+          const traceUrl = getTraceUrlFromHash();
+          if (traceUrl) {
+            loadTraceFromUrl(traceUrl);
+          }
+        });
+
+        // Also handle hash changes (for SPA navigation)
+        window.addEventListener('hashchange', function() {
+          const traceUrl = getTraceUrlFromHash();
+          if (traceUrl) {
+            loadTraceFromUrl(traceUrl);
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

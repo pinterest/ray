@@ -175,6 +175,14 @@ export const CpuProfilerButton = ({
     handleClose();
   };
 
+  const openInTraceViewer = () => {
+    const profileUrl = buildProfileUrl();
+    const absoluteUrl = `${window.location.origin}/${profileUrl}`;
+    const traceViewerUrl = `/trace-viewer/index.html#traceURL=${encodeURIComponent(absoluteUrl)}`;
+    window.open(traceViewerUrl, "_blank");
+    handleClose();
+  };
+
   const openInPerfetto = async () => {
     const profileUrl = buildProfileUrl();
     const absoluteUrl = `${window.location.origin}/${profileUrl}`;
@@ -313,7 +321,15 @@ export const CpuProfilerButton = ({
                 onClick={openInSpeedscope}
                 style={{ textTransform: "capitalize" }}
               >
-                Open&nbsp;in&nbsp;Viewer
+                Open&nbsp;in&nbsp;Speedscope
+              </Button>
+              <Button
+                color="primary"
+                variant="text"
+                onClick={openInTraceViewer}
+                style={{ textTransform: "capitalize" }}
+              >
+                Open&nbsp;in&nbsp;Trace&nbsp;Viewer
               </Button>
               <Button
                 color="primary"

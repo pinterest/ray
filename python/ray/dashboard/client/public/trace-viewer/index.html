@@ -3706,7 +3706,16 @@ html,body{height:100%}body{flex-direction:column;display:flex;margin:0;padding:0
         function trySet() {
           if (window.profilingView && window.profilingView.setActiveTrace) {
             window.profilingView.setActiveTrace('trace.json', data);
-            overlay.classList.add('hidden');
+            // Wait for model to actually load
+            function waitForModel() {
+              var tv = window.profilingView.timelineView;
+              if (tv && tv.model && tv.model.processes && Object.keys(tv.model.processes).length > 0) {
+                overlay.classList.add('hidden');
+              } else {
+                setTimeout(waitForModel, 100);
+              }
+            }
+            waitForModel();
           } else {
             setTimeout(trySet, 100);
           }

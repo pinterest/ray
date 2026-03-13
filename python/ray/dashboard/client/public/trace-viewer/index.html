@@ -3710,7 +3710,7 @@ html,body{height:100%}body{flex-direction:column;display:flex;margin:0;padding:0
             function waitForModel() {
               var tv = window.profilingView.timelineView;
               if (tv && tv.model && tv.model.processes && Object.keys(tv.model.processes).length > 0) {
-                overlay.classList.add('hidden');
+                overlay.style.display = 'none';
               } else {
                 setTimeout(waitForModel, 100);
               }

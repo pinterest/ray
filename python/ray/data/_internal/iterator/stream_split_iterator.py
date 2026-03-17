@@ -176,6 +176,11 @@ class SplitCoordinator:
         # Store the error raised from the `gen_epoch` call.
         self._gen_epoch_error: Optional[Exception] = None
 
+        # Synchronized shutdown state
+        self._shutdown_received_from = set()  # Track which shards have called shutdown
+        self._shutdown_complete = False  # Flag to indicate shutdown is complete
+        self._shutdown_force_requested = False  # Track if any shard requested force
+
     def stats(self) -> DatasetStats:
         """Returns stats from the base dataset."""
         if self._executor:
@@ -247,17 +252,84 @@ class SplitCoordinator:
             # Track overhead time in the instance variable
             self._coordinator_overhead_s += time.perf_counter() - start_time
 
-    def shutdown_executor(self, force: bool = False):
-        """Shuts down the internal data executor."""
+    def shutdown_executor(
+        self,
+        force: bool = False,
+        split_idx: Optional[int] = None,
+        sync_shutdown: bool = False,
+    ):
+        """Shuts down the internal data executor.
+
+        Args:
+            force: If True, pass force=True to the executor shutdown (cleanup
+                executor and output_iterator references). Works independently
+                with sync_shutdown.
+            split_idx: The shard index calling shutdown. Required when
+                sync_shutdown is True.
+            sync_shutdown: If True, wait for all shards to call shutdown before
+                actually shutting down. Only shard 0 performs the actual shutdown.
+
+        Raises:
+            ValueError: If sync_shutdown is True and:
+                - split_idx is not provided
+                - same shard calls shutdown twice before sync completes
+        """
+        if not sync_shutdown:
+            # Original behavior: immediate shutdown
+            with self._lock:
+                if self._executor is not None:
+                    if force:
+                        self._executor.shutdown(force=True)
+                        self._executor = None
+                        self._output_iterator = None
+                    else:
+                        self._executor.shutdown(force=False)
+            return
+
+        # Synchronized shutdown mode
+        # Validate split_idx is provided
+        if split_idx is None:
+            raise ValueError("split_idx is required when sync_shutdown is True")
+
+        # Register this shard's shutdown call (with validation)
         with self._lock:
-            # Call shutdown on the executor
-            if self._executor is not None:
-                if force:
-                    self._executor.shutdown(force=True)
-                    self._executor = None
-                    self._output_iterator = None
-                else: 
-                    self._executor.shutdown(force=False)
+            # Ignore if shutdown called before epoch started
+            if self._cur_epoch < 0:
+                return
+
+            # Fail if same shard calls shutdown twice
+            if split_idx in self._shutdown_received_from:
+                raise ValueError(
+                    f"Shard {split_idx} already called shutdown_executor. "
+                    f"Duplicate shutdown calls are not allowed."
+                )
+
+            # Record this shard's shutdown call and force preference
+            self._shutdown_received_from.add(split_idx)
+            if force:
+                self._shutdown_force_requested = True
+
+        # Wait for all shards to register (barrier)
+        while len(self._shutdown_received_from) < self._n:
+            time.sleep(0.1)
+
+        # Only shard 0 performs the actual shutdown
+        if split_idx == 0:
+            with self._lock:
+                if not self._shutdown_complete and self._executor is not None:
+                    # Use force=True if any shard requested it
+                    use_force = self._shutdown_force_requested
+                    if use_force:
+                        self._executor.shutdown(force=True)
+                        self._executor = None
+                        self._output_iterator = None
+                    else:
+                        self._executor.shutdown(force=False)
+                    self._shutdown_complete = True
+        else:
+            # Other shards wait for shard 0 to complete shutdown
+            while not self._shutdown_complete:
+                time.sleep(0.1)
 
     def _barrier(self, split_idx: int) -> int:
         """Arrive and block until the start of the given epoch."""

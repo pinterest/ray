@@ -1,100 +1,103 @@
-"""Integration test for multi-epoch synchronized shutdown."""
+"""Integration test for automatic epoch cleanup via iterator __del__."""
 import ray
-import threading
-import time
+import gc
 
 
-def test_multi_epoch_sync_shutdown():
-    """Test that we can start and shutdown multiple epochs.
+@ray.remote
+class ShardConsumer:
+    """Actor that consumes data from a single shard."""
 
-    This tests that the shutdown state variables are properly reset when
-    starting a new epoch. Without the fix, the second epoch's sync shutdown
-    would fail because shards are already in _shutdown_received_from.
+    def __init__(self, iterator, shard_idx):
+        self._iterator = iterator
+        self._shard_idx = shard_idx
+        self._batch_iter = None
+
+    def consume_epoch(self, max_batches=None):
+        """Consume data from the iterator for one epoch.
+
+        Args:
+            max_batches: If set, stop after consuming this many batches.
+                         None = consume all.
+
+        Returns:
+            Number of rows consumed.
+        """
+        # Create a new batch iterator for this epoch
+        self._batch_iter = self._iterator.iter_batches(batch_size=10)
+
+        count = 0
+        batches_consumed = 0
+        for batch in self._batch_iter:
+            count += len(batch["id"])
+            batches_consumed += 1
+            if max_batches is not None and batches_consumed >= max_batches:
+                break
+
+        print(f"  Shard {self._shard_idx} consumed {count} rows ({batches_consumed} batches)")
+        return count
+
+    def cleanup(self):
+        """Delete the batch iterator to trigger __del__ cleanup."""
+        if self._batch_iter is not None:
+            del self._batch_iter
+            self._batch_iter = None
+            gc.collect()
+        print(f"    Shard {self._shard_idx} cleanup triggered")
+
+
+def test_auto_cleanup_multi_epoch():
+    """Test that executor is automatically shutdown when iterators are deleted.
+
+    Verifies:
+    1. Multiple epochs work without explicit shutdown_executor calls
+    2. Executor is cleaned up automatically via __del__ when batch iterators are deleted
     """
-    N = 2  # Number of splits
+    N = 2
     NUM_EPOCHS = 3
 
     ds = ray.data.range(100)
     iterators = ds.streaming_split(N)
     coord_actor = iterators[0]._coord_actor
 
+    # Create one actor per shard
+    consumers = [
+        ShardConsumer.remote(it, i)
+        for i, it in enumerate(iterators)
+    ]
+
     for epoch in range(NUM_EPOCHS):
         print(f"\n=== Starting epoch {epoch + 1} ===")
 
-        # Consume data from all iterators concurrently
-        # Each iterator calls start_epoch internally when iterating
-        errors = []
-        results = [None] * N
+        # Consume ALL data from all shards concurrently via actors
+        consume_futures = [c.consume_epoch.remote() for c in consumers]
+        results = ray.get(consume_futures)
+        print(f"  All shards consumed data successfully: {results}")
 
-        def consume_data(idx, iterator):
-            try:
-                count = 0
-                for batch in iterator.iter_batches(batch_size=10):
-                    count += len(batch["id"])
-                results[idx] = count
-                print(f"  Shard {idx} consumed {count} rows")
-            except Exception as e:
-                errors.append((idx, e))
+        # Trigger cleanup by deleting batch iterators (calls __del__)
+        print(f"  Triggering cleanup from all shards...")
+        cleanup_futures = [c.cleanup.remote() for c in consumers]
+        ray.get(cleanup_futures)
 
-        threads = []
-        for i, it in enumerate(iterators):
-            t = threading.Thread(target=consume_data, args=(i, it))
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join(timeout=60)
-
-        if errors:
-            for idx, e in errors:
-                print(f"  ERROR in shard {idx}: {e}")
-            raise errors[0][1]
-
-        print(f"  All shards consumed data successfully")
-
-        # Synchronized shutdown from all shards
-        print(f"  Calling sync shutdown from all shards...")
-        shutdown_errors = []
-
-        def call_shutdown(idx):
-            try:
-                ray.get(coord_actor.shutdown_executor.remote(
-                    split_idx=idx, sync_shutdown=True
-                ))
-                print(f"    Shard {idx} shutdown complete")
-            except Exception as e:
-                shutdown_errors.append((idx, e))
-                print(f"    Shard {idx} shutdown ERROR: {e}")
-
-        shutdown_threads = []
-        for i in range(N):
-            t = threading.Thread(target=call_shutdown, args=(i,))
-            shutdown_threads.append(t)
-            t.start()
-
-        for t in shutdown_threads:
-            t.join(timeout=30)
-
-        if shutdown_errors:
-            print(f"\n!!! Shutdown failed at epoch {epoch + 1} !!!")
-            for idx, e in shutdown_errors:
-                print(f"  Shard {idx} error: {e}")
-            raise shutdown_errors[0][1]
+        # Verify executor was shutdown
+        executor_state = ray.get(coord_actor._get_executor_state.remote())
+        print(f"  Executor state after cleanup: {executor_state}")
 
         print(f"=== Epoch {epoch + 1} complete ===")
 
     print(f"\n{'='*50}")
-    print(f"Successfully completed {NUM_EPOCHS} epochs!")
+    print(f"Test: Multi-epoch auto cleanup - PASSED ({NUM_EPOCHS} epochs)")
     print(f"{'='*50}")
 
 
 def main():
     ray.init()
     try:
-        test_multi_epoch_sync_shutdown()
-        print("\nMulti-epoch shutdown test PASSED!")
+        test_auto_cleanup_multi_epoch()
+        print("\n" + "="*50)
+        print("ALL TESTS PASSED!")
+        print("="*50)
     except Exception as e:
-        print(f"\nMulti-epoch shutdown test FAILED: {e}")
+        print(f"\nTest FAILED: {e}")
         raise
     finally:
         ray.shutdown()

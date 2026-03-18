@@ -25,6 +25,41 @@ logger = logging.getLogger(__name__)
 BLOCKED_CLIENT_WARN_TIMEOUT = 30
 
 
+class _CleanupIterator:
+    """Iterator wrapper that triggers epoch cleanup when deleted."""
+
+    DEFAULT_CLEANUP_TIMEOUT_S = 30
+
+    def __init__(self, gen, coord_actor, split_idx):
+        self._gen = gen
+        self._coord_actor = coord_actor
+        self._split_idx = split_idx
+        self._cleaned_up = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._gen)
+
+    def __del__(self):
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+        try:
+            ray.get(
+                self._coord_actor.end_epoch.remote(self._split_idx),
+                timeout=self.DEFAULT_CLEANUP_TIMEOUT_S,
+            )
+        except ray.exceptions.GetTimeoutError:
+            logger.warning(
+                f"Shard {self._split_idx} cleanup timed out waiting for other shards"
+            )
+        except Exception:
+            # Ray shutdown or other error - ignore in __del__
+            pass
+
+
 class _DatasetWrapper:
     # A temporary workaround for https://github.com/ray-project/ray/issues/52549
 
@@ -95,7 +130,13 @@ class StreamSplitDataIterator(DataIterator):
                         schema=block_ref_and_md.schema,
                     )
 
-        return gen_blocks(), self._iter_stats, False
+        return (
+            _CleanupIterator(
+                gen_blocks(), self._coord_actor, self._output_split_idx
+            ),
+            self._iter_stats,
+            False,
+        )
 
     def stats(self) -> str:
         """Implements DataIterator."""
@@ -180,6 +221,9 @@ class SplitCoordinator:
         self._shutdown_received_from = set()  # Track which shards have called shutdown
         self._shutdown_complete = False  # Flag to indicate shutdown is complete
         self._shutdown_force_requested = False  # Track if any shard requested force
+
+        # Epoch cleanup state
+        self._epoch_done_from = set()
 
     def stats(self) -> DatasetStats:
         """Returns stats from the base dataset."""
@@ -330,6 +374,37 @@ class SplitCoordinator:
             # Other shards wait for shard 0 to complete shutdown
             while not self._shutdown_complete:
                 time.sleep(0.1)
+
+    def end_epoch(self, split_idx: int):
+        """Signal that a shard has finished consuming the current epoch.
+
+        Blocks until all shards have called end_epoch, then performs cleanup.
+        """
+        with self._lock:
+            self._epoch_done_from.add(split_idx)
+
+        # Wait for all shards to signal completion
+        while len(self._epoch_done_from) < self._n:
+            time.sleep(0.1)
+
+        # Only shard 0 performs the actual cleanup
+        if split_idx == 0:
+            with self._lock:
+                if self._executor is not None:
+                    self._executor.shutdown(force=False)
+                # Reset for next epoch
+                self._epoch_done_from = set()
+        else:
+            # Other shards wait for shard 0 to complete cleanup
+            while len(self._epoch_done_from) > 0:
+                time.sleep(0.1)
+
+    def _get_executor_state(self) -> str:
+        """Return executor state for testing purposes."""
+        with self._lock:
+            if self._executor is None:
+                return "None"
+            return "active"
 
     def _barrier(self, split_idx: int) -> int:
         """Arrive and block until the start of the given epoch."""

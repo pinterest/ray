@@ -360,6 +360,10 @@ class SplitCoordinator:
             if self._cur_epoch == starting_epoch:
                 self._cur_epoch += 1
                 self._unfinished_clients_in_epoch = self._n
+                # Reset shutdown state for the new epoch
+                self._shutdown_received_from = set()
+                self._shutdown_complete = False
+                self._shutdown_force_requested = False
                 try:
                     self._output_iterator = next(self._next_epoch)
                 except Exception as e:

@@ -48,7 +48,9 @@ class _CleanupIterator:
         self._cleaned_up = True
         try:
             ray.get(
-                self._coord_actor.end_epoch.remote(self._split_idx),
+                self._coord_actor.shutdown_executor.remote(
+                    split_idx=self._split_idx, sync_shutdown=True
+                ),
                 timeout=self.DEFAULT_CLEANUP_TIMEOUT_S,
             )
         except ray.exceptions.GetTimeoutError:
@@ -222,9 +224,6 @@ class SplitCoordinator:
         self._shutdown_complete = False  # Flag to indicate shutdown is complete
         self._shutdown_force_requested = False  # Track if any shard requested force
 
-        # Epoch cleanup state
-        self._epoch_done_from = set()
-
     def stats(self) -> DatasetStats:
         """Returns stats from the base dataset."""
         if self._executor:
@@ -373,30 +372,6 @@ class SplitCoordinator:
         else:
             # Other shards wait for shard 0 to complete shutdown
             while not self._shutdown_complete:
-                time.sleep(0.1)
-
-    def end_epoch(self, split_idx: int):
-        """Signal that a shard has finished consuming the current epoch.
-
-        Blocks until all shards have called end_epoch, then performs cleanup.
-        """
-        with self._lock:
-            self._epoch_done_from.add(split_idx)
-
-        # Wait for all shards to signal completion
-        while len(self._epoch_done_from) < self._n:
-            time.sleep(0.1)
-
-        # Only shard 0 performs the actual cleanup
-        if split_idx == 0:
-            with self._lock:
-                if self._executor is not None:
-                    self._executor.shutdown(force=False)
-                # Reset for next epoch
-                self._epoch_done_from = set()
-        else:
-            # Other shards wait for shard 0 to complete cleanup
-            while len(self._epoch_done_from) > 0:
                 time.sleep(0.1)
 
     def _get_executor_state(self) -> str:

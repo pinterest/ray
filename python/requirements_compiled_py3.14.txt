@@ -2247,7 +2247,7 @@ stack-data==0.6.3
     # via ipython
 stanio==0.5.1
     # via cmdstanpy
-starlette==0.49.3
+starlette==1.0.1
     # via
     #   -r python/requirements.txt
     #   -r python/requirements/py313/test-requirements.txt

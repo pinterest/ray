@@ -705,7 +705,7 @@ googleapis-common-protos==1.61.0
     #   tensorflow-metadata
 gpytorch==1.15.2
     # via botorch
-gradio==3.50.2 ; platform_system != "Windows"
+gradio==6.15.0 ; platform_system != "Windows"
     # via
     #   -r python/requirements/serve/serve-test-requirements.txt
     #   -r python/requirements/test-requirements.txt

@@ -789,7 +789,7 @@ httpcore==1.0.9
     # via
     #   -r python/requirements/py313/test-requirements.txt
     #   httpx
-httplib2==0.20.4
+httplib2==0.32.0
     # via
     #   gcs-oauth2-boto-plugin
     #   google-api-python-client

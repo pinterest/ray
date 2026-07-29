@@ -7,8 +7,10 @@ import {
   Switch,
   TextField,
 } from "@mui/material";
-import React, { memo, useState } from "react";
-import LogVirtualView from "../../components/LogView/LogVirtualView";
+import React, { memo, useRef, useState } from "react";
+import LogVirtualView, {
+  LogVirtualViewHandle,
+} from "../../components/LogView/LogVirtualView";
 
 const useLogViewer = () => {
   const [search, setSearch] =
@@ -53,6 +55,7 @@ export const LogViewer = memo(
   }: LogViewerProps) => {
     const { search, setSearch, startTime, setStart, endTime, setEnd } =
       useLogViewer();
+    const logVirtualViewRef = useRef<LogVirtualViewHandle>(null);
 
     return (
       <React.Fragment>
@@ -118,6 +121,15 @@ export const LogViewer = memo(
                   sx={{ margin: 1 }}
                   variant="contained"
                   onClick={() => {
+                    logVirtualViewRef.current?.scrollToBottom();
+                  }}
+                >
+                  Jump to end
+                </Button>
+                <Button
+                  sx={{ margin: 1 }}
+                  variant="contained"
+                  onClick={() => {
                     setStart("");
                     setEnd("");
                   }}
@@ -137,6 +149,7 @@ export const LogViewer = memo(
               </Box>
             </div>
             <LogVirtualView
+              ref={logVirtualViewRef}
               height={height}
               revert={search?.revert}
               keywords={search?.keywords}

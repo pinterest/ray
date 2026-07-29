@@ -3,9 +3,11 @@ import dayjs from "dayjs";
 import prolog from "highlight.js/lib/languages/prolog";
 import { lowlight } from "lowlight";
 import React, {
+  forwardRef,
   MutableRefObject,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
 } from "react";
@@ -74,6 +76,10 @@ const value2react = (
     default:
       return [];
   }
+};
+
+export type LogVirtualViewHandle = {
+  scrollToBottom: () => void;
 };
 
 export type LogVirtualViewProps = {
@@ -188,22 +194,26 @@ const LogLineDetailDialog = ({
   );
 };
 
-const LogVirtualView: React.FC<LogVirtualViewProps> = ({
-  content,
-  width = "100%",
-  height,
-  fontSize = 12,
-  theme = "light",
-  keywords = "",
-  language = "dos",
-  focusLine = 1,
-  style = {},
-  listRef,
-  onScrollBottom,
-  revert = false,
-  startTime,
-  endTime,
-}) => {
+const LogVirtualView = forwardRef<LogVirtualViewHandle, LogVirtualViewProps>(
+  (
+    {
+      content,
+      width = "100%",
+      height,
+      fontSize = 12,
+      theme = "light",
+      keywords = "",
+      language = "dos",
+      focusLine = 1,
+      style = {},
+      listRef,
+      onScrollBottom,
+      revert = false,
+      startTime,
+      endTime,
+    },
+    ref,
+  ) => {
   const [logs, setLogs] = useState<{ i: number; origin: string }[]>([]);
   const total = logs.length;
   const timmer = useRef<ReturnType<typeof setTimeout>>();
@@ -214,6 +224,17 @@ const LogVirtualView: React.FC<LogVirtualViewProps> = ({
   }
   const [selectedLogLine, setSelectedLogLine] =
     useState<[string | null, string]>();
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollToBottom: () => {
+        // When `revert` is on, the last log line is displayed at the top.
+        el.current?.scrollToItem(revert ? 0 : total - 1, "end");
+      },
+    }),
+    [revert, total],
+  );
   const handleLogLineClick = useCallback(
     (logLine: string | null, message: string) => {
       setSelectedLogLine([logLine, message]);
@@ -377,6 +398,9 @@ const LogVirtualView: React.FC<LogVirtualViewProps> = ({
       )}
     </div>
   );
-};
+  },
+);
+
+LogVirtualView.displayName = "LogVirtualView";
 
 export default LogVirtualView;

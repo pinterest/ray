@@ -1,6 +1,7 @@
 """
 Module to write a Ray Dataset into an iceberg table, by using the Ray Datasink API.
 """
+import itertools
 import logging
 import uuid
 from collections import defaultdict
@@ -426,6 +427,14 @@ class IcebergDatasink(
         if self._table is None:
             self._reload_table()
 
+        # Data-file names are `00000-<task_id>-<write_uuid>.parquet`, but
+        # `_write_uuid` is shared across tasks and `task_id` restarts at 0 each
+        # call, so two tasks writing the same partition collide on one object key
+        # (last-writer-wins on S3, both committed -> 416 / data loss). Fold this
+        # task's unique index into the uuid, with one counter across its blocks.
+        task_write_uuid = uuid.uuid5(self._write_uuid, str(ctx.task_idx))
+        file_counter = itertools.count(0)
+
         all_data_files = []
         join_keys_dict = defaultdict(list)
         first_schema = None
@@ -472,9 +481,10 @@ class IcebergDatasink(
                 data_files = list(
                     _dataframe_to_data_files(
                         table_metadata=self._table.metadata,
-                        write_uuid=self._write_uuid,
+                        write_uuid=task_write_uuid,
                         df=pa_table,
                         io=self._table.io,
+                        counter=file_counter,
                     )
                 )
                 all_data_files.extend(data_files)

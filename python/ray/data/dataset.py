@@ -3779,6 +3779,7 @@ class Dataset:
         concurrency: Optional[int] = None,
         num_rows_per_file: Optional[int] = None,
         mode: SaveMode = SaveMode.APPEND,
+        stream_writes: bool = False,
         **arrow_parquet_args,
     ) -> None:
         """Writes the :class:`~ray.data.Dataset` to parquet files under the provided ``path``.
@@ -3871,6 +3872,23 @@ class Dataset:
                 "ignore", "append". Defaults to "append".
                 NOTE: This method isn't atomic. "Overwrite" first deletes all the data
                 before writing to `path`.
+            stream_writes: [Experimental] If ``True``, each write task appends one row
+                group per block to a single open file instead of holding all of its
+                blocks in memory and writing them at the end. This bounds each write
+                task's peak memory to a single block, which matters when the read,
+                transform, and write operators fuse into one task and the default path
+                would otherwise materialize the task's entire output before flushing.
+                The output is still one file per task with the same filename. Each task
+                stages its file on local disk and uploads it on completion, so the node
+                needs room for one file per concurrently running write task; set
+                ``RAY_DATA_PARQUET_WRITE_STAGE_DIR`` to choose where. Because the blocks
+                are consumed as they stream, a failed write can't be retried in place
+                and Ray retries the whole task instead. Not supported together with
+                ``partition_cols``. Because only one block is held at a time, blocks
+                whose schemas differ can't be unified the way the default path unifies
+                them; the first block's schema is used and later blocks are cast to it,
+                so pass an explicit ``schema`` if your blocks aren't uniform. Defaults
+                to ``False``.
         """  # noqa: E501
         if arrow_parquet_args_fn is None:
             arrow_parquet_args_fn = lambda: {}  # noqa: E731
@@ -3894,6 +3912,7 @@ class Dataset:
             filename_provider=filename_provider,
             dataset_uuid=self._uuid,
             mode=mode,
+            stream_writes=stream_writes,
         )
         self.write_datasink(
             datasink,

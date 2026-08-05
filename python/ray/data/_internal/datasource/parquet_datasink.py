@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 
@@ -35,6 +37,18 @@ UNSUPPORTED_OPEN_STREAM_ARGS = {"path", "buffer", "metadata"}
 
 # https://arrow.apache.org/docs/python/generated/pyarrow.dataset.write_dataset.html
 ARROW_DEFAULT_MAX_ROWS_PER_GROUP = 1024 * 1024
+
+# Overrides the root directory that `stream_writes` stages task output in. Defaults to a
+# subdirectory of the system temp dir. Note that Ray's object spilling may live on the
+# same volume, so staged files are always removed once uploaded -- a leaked stage file
+# per task would push a shared volume toward the spill capacity threshold and make Ray
+# start failing tasks.
+STAGE_DIR_ENV_VAR = "RAY_DATA_PARQUET_WRITE_STAGE_DIR"
+DEFAULT_STAGE_DIR_NAME = "ray_data_parquet_write_stage"
+
+# Chunk size for copying a staged file to its destination. Large enough to keep object
+# store multipart uploads efficient without materializing the whole file in memory.
+STAGE_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +131,7 @@ class ParquetDatasink(_FileDatasink):
         filename_provider: Optional[FilenameProvider] = None,
         dataset_uuid: Optional[str] = None,
         mode: SaveMode = SaveMode.APPEND,
+        stream_writes: bool = False,
     ):
         if arrow_parquet_args_fn is None:
             arrow_parquet_args_fn = lambda: {}  # noqa: E731
@@ -129,6 +144,13 @@ class ParquetDatasink(_FileDatasink):
         self.min_rows_per_file = min_rows_per_file
         self.max_rows_per_file = max_rows_per_file
         self.partition_cols = partition_cols
+        self.stream_writes = stream_writes
+
+        if stream_writes and partition_cols:
+            raise ValueError(
+                "`stream_writes` doesn't support `partition_cols`, because it writes "
+                "one file per task rather than routing rows to per-partition files."
+            )
 
         if self.min_rows_per_file is not None and self.max_rows_per_file is not None:
             assert (
@@ -166,6 +188,9 @@ class ParquetDatasink(_FileDatasink):
         ctx: TaskContext,
     ) -> None:
         import pyarrow as pa
+
+        if self.stream_writes:
+            return self._write_streaming(blocks, ctx)
 
         blocks = list(blocks)
 
@@ -208,6 +233,179 @@ class ParquetDatasink(_FileDatasink):
             max_attempts=WRITE_FILE_MAX_ATTEMPTS,
             max_backoff_s=WRITE_FILE_RETRY_MAX_BACKOFF_SECONDS,
         )
+
+    def _write_streaming(
+        self,
+        blocks: Iterable[Block],
+        ctx: TaskContext,
+    ) -> None:
+        """Writes each block as a row group, without buffering the whole task's blocks.
+
+        The default write path calls `list(blocks)` and holds every block of the task in
+        memory until the last one arrives. When the read, transform, and write operators
+        fuse into a single task, that pulls the entire fused pipeline to exhaustion
+        before a single row is flushed, so peak memory scales with the task's whole
+        output.
+
+        This path instead appends each block to one open `ParquetWriter` and drops the
+        reference before pulling the next, bounding peak memory to a single block. The
+        output is still exactly one file per task, using the same deterministic filename
+        the default path produces, so a task-level retry reopens the same path and
+        overwrites it wholesale rather than leaking duplicate rows. A per-block file
+        would not be idempotent: a partial first attempt would strand its already
+        flushed blocks as duplicate rows for the downstream reader.
+
+        The writer's sink is a LOCAL file, uploaded to the destination once the last
+        block is written, rather than the destination stream itself. The reason is
+        credential lifetime. Writing straight to an object store keeps that stream open
+        for the task's entire duration, and pyarrow's `S3FileSystem` binds AWS
+        credentials when it is constructed, so every underlying `UploadPart` reuses the
+        credentials captured at open time. Each part is separately signed, but signing
+        cannot renew a session token, so a task whose stream straddles the token expiry
+        fails with `ExpiredToken`, surfaced as `AWS Error UNKNOWN (HTTP status 400)`.
+        That string is not in `DataContext.retried_io_errors`, so it isn't retried, and
+        refreshing the filesystem mid-task doesn't help because the open stream keeps
+        its original credentials. The default path avoids this by doing all of its work
+        before opening any stream; staging locally restores that property, shrinking the
+        credential window from the whole task to the few seconds of the final upload.
+
+        Driving the multipart upload directly -- one `UploadPart` per block, each with a
+        freshly resolved client -- would remove the local disk requirement and bound
+        memory to one part. It is deliberately not done here: pyarrow exposes no way to
+        resume an upload (`UploadId` and the ETag list are private to the stream, and
+        reopening a stream starts a new upload that truncates the object), so it would
+        mean owning part numbering, ETag ordering, the 5MB minimum part size, the
+        10,000 part ceiling, and abort-on-failure inside the datasink. Local staging
+        gets the same memory bound without that surface.
+
+        Staging also makes each task's output atomic in practice: nothing appears at the
+        destination until the local file is complete, so a failed task cannot leave a
+        truncated, footerless file behind for the downstream reader. The tradeoff versus
+        the default path is that write resilience becomes task-level rather than the
+        default per-write `call_with_retry` -- a mid-upload error can't be retried in
+        place because the upstream generator is already consumed and can't be rewound,
+        so Ray retries the whole task.
+
+        One behavioral difference from the default path: it collects every block, so it
+        can `pa.unify_schemas` across them and widen a column that is null-typed in one
+        block and concretely typed in another. Holding a single block makes that
+        impossible here, so the first block's schema is adopted and later blocks are cast
+        to it, which raises when a later block needs a wider type. Callers with
+        non-uniform blocks must pass an explicit `schema`.
+        """
+        import pyarrow.parquet as pq
+
+        write_kwargs = _resolve_kwargs(
+            self.arrow_parquet_args_fn, **self.arrow_parquet_args
+        )
+        user_schema = write_kwargs.pop("schema", None)
+        # Only meaningful to `ds.write_dataset`; this path writes one row group per
+        # block, so the block boundaries set the row group size.
+        write_kwargs.pop("row_group_size", None)
+
+        stage_dir = self._staging_dir(ctx)
+        os.makedirs(stage_dir, exist_ok=True)
+
+        # One writer and one staged file per task, opened lazily on the first non-empty
+        # block so an all-empty task writes nothing, matching the default path's
+        # zero-row skip.
+        writer = None
+        stage_path = None
+        write_path = None
+        try:
+            for block in blocks:
+                accessor = BlockAccessor.for_block(block)
+                if accessor.num_rows() == 0:
+                    continue
+
+                table = accessor.to_arrow()
+                if writer is None:
+                    # Pin block_index to 0: one file per task keeps the name stable
+                    # across retries. The stage file reuses the name so a retry
+                    # overwrites its own stage file instead of colliding with a
+                    # concurrent task.
+                    filename = self.filename_provider.get_filename_for_block(
+                        block, ctx.kwargs[WRITE_UUID_KWARG_NAME], ctx.task_idx, 0
+                    )
+                    write_path = f"{self.path.rstrip('/')}/{filename}"
+                    stage_path = os.path.join(stage_dir, filename)
+                    logger.debug(f"Staging {filename} at {stage_path}.")
+                    schema = user_schema if user_schema is not None else table.schema
+                    writer = pq.ParquetWriter(stage_path, schema, **write_kwargs)
+                if not table.schema.equals(writer.schema):
+                    table = table.cast(writer.schema)
+                writer.write_table(table)
+                del table, accessor
+
+            if writer is None:
+                return
+
+            # Finalize the local file, writing the parquet footer, before uploading, so
+            # what lands at the destination is always complete and readable. Cleared
+            # first so the `finally` block doesn't double-close.
+            writer, to_close = None, writer
+            to_close.close()
+
+            logger.debug(f"Uploading {stage_path} to {write_path}.")
+            self._upload_staged_file(stage_path, write_path)
+        finally:
+            if writer is not None:
+                # Failure path: close the writer so the fd isn't leaked. The partial
+                # stage file is removed below.
+                try:
+                    writer.close()
+                except Exception:
+                    logger.exception(
+                        f"Failed to close parquet writer for {stage_path}."
+                    )
+            # Runs on the success path as well as on failure, so a staged file never
+            # outlives the task that wrote it.
+            if stage_path is not None:
+                try:
+                    os.remove(stage_path)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    # Never mask the original error, but do flag the leak: staged files
+                    # may share a volume with Ray's object spilling.
+                    logger.exception(f"Failed to remove staged file {stage_path}.")
+                # Best effort: removes the per-write directory once the last task on
+                # this node finishes. Fails harmlessly while sibling tasks still have
+                # files staged, since the directory isn't empty yet.
+                try:
+                    os.rmdir(stage_dir)
+                except OSError:
+                    pass
+
+    def _staging_dir(self, ctx: TaskContext) -> str:
+        """Returns the directory used to stage this task's output before uploading.
+
+        The path is namespaced by the per-write UUID so that concurrent or successive
+        writes -- including separate Ray jobs sharing a node, and separate write calls
+        within one job -- never stage into the same directory. Combined with the
+        task-deterministic filename, that means a given stage path belongs to exactly
+        one write task, so a retry overwrites only its own partial output.
+        """
+        stage_root = os.environ.get(STAGE_DIR_ENV_VAR) or os.path.join(
+            tempfile.gettempdir(), DEFAULT_STAGE_DIR_NAME
+        )
+        return os.path.join(stage_root, ctx.kwargs[WRITE_UUID_KWARG_NAME])
+
+    def _upload_staged_file(self, stage_path: str, write_path: str) -> None:
+        """Copies the finalized local file to `write_path` in chunks.
+
+        The destination stream is opened here, immediately before the transfer, so it
+        holds freshly resolved credentials for the seconds the upload takes rather than
+        credentials captured when the task started.
+        """
+        with open(stage_path, "rb") as src, self.open_output_stream(
+            write_path
+        ) as dest:
+            while True:
+                chunk = src.read(STAGE_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                dest.write(chunk)
 
     def _get_basename_template(self, filename: str, write_uuid: str) -> str:
         # Check if write_uuid is present in filename, add if missing

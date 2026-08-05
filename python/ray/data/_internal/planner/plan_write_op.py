@@ -1,4 +1,3 @@
-import itertools
 import uuid
 from typing import Callable, Iterator, List, Union
 
@@ -25,17 +24,51 @@ def generate_write_fn(
     def fn(blocks: Iterator[Block], ctx: TaskContext) -> Iterator[Block]:
         """Writes the blocks to the given datasink or legacy datasource.
 
-        Outputs the original blocks to be written."""
-        # Create a copy of the iterator, so we can return the original blocks.
-        it1, it2 = itertools.tee(blocks, 2)
-        if isinstance(datasink_or_legacy_datasource, Datasink):
-            ctx.kwargs["_datasink_write_return"] = datasink_or_legacy_datasource.write(
-                it1, ctx
-            )
-        else:
-            datasink_or_legacy_datasource.write(it1, ctx, **write_args)
+        Outputs a single block holding stats about the write.
 
-        return it2
+        Row/size stats are accumulated as the datasink consumes the block stream, so
+        the stream is only traversed once and no block is retained after it has been
+        written. Handing the datasink one half of an `itertools.tee` and returning the
+        other for a second stats pass would instead buffer every block a streaming
+        datasink has already drained, making peak memory scale with the whole
+        partition rather than a single block.
+        """
+        num_rows = 0
+        size_bytes = 0
+
+        def count_blocks(blocks: Iterator[Block]) -> Iterator[Block]:
+            nonlocal num_rows, size_bytes
+            for block in blocks:
+                accessor = BlockAccessor.for_block(block)
+                num_rows += accessor.num_rows()
+                size_bytes += accessor.size_bytes()
+                yield block
+
+        counted_blocks = count_blocks(blocks)
+        if isinstance(datasink_or_legacy_datasource, Datasink):
+            write_return = datasink_or_legacy_datasource.write(counted_blocks, ctx)
+        else:
+            datasink_or_legacy_datasource.write(counted_blocks, ctx, **write_args)
+            write_return = None
+
+        # A datasink is expected to consume the stream, but isn't required to. Drain
+        # whatever it left so the stats stay accurate; blocks are dropped as they're
+        # counted, so this buffers nothing.
+        for _ in counted_blocks:
+            pass
+
+        # NOTE: Write tasks can return anything, so we need to wrap it in a valid block
+        # type.
+        import pandas as pd
+
+        block = pd.DataFrame(
+            {
+                "num_rows": [num_rows],
+                "size_bytes": [size_bytes],
+                "write_return": [write_return],
+            }
+        )
+        return iter([block])
 
     return fn
 
@@ -46,23 +79,8 @@ def generate_collect_write_stats_fn() -> BlockMapTransformFn:
     # Otherwise, an error will be raised. The Datasource can handle
     # execution outcomes with `on_write_complete()`` and `on_write_failed()``.
     def fn(blocks: Iterator[Block], ctx: TaskContext) -> Iterator[Block]:
-        """Handles stats collection for block writes."""
-        block_accessors = [BlockAccessor.for_block(block) for block in blocks]
-        total_num_rows = sum(ba.num_rows() for ba in block_accessors)
-        total_size_bytes = sum(ba.size_bytes() for ba in block_accessors)
-
-        # NOTE: Write tasks can return anything, so we need to wrap it in a valid block
-        # type.
-        import pandas as pd
-
-        block = pd.DataFrame(
-            {
-                "num_rows": [total_num_rows],
-                "size_bytes": [total_size_bytes],
-                "write_return": [ctx.kwargs.get("_datasink_write_return", None)],
-            }
-        )
-        return iter([block])
+        """Passes through the stats block that `generate_write_fn` produced."""
+        yield from blocks
 
     return BlockMapTransformFn(
         fn,

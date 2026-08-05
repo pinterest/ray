@@ -13,7 +13,7 @@ import ray
 from ray.data._internal.datasource.bigquery_datasink import BigQueryDatasink
 from ray.data._internal.datasource.bigquery_datasource import BigQueryDatasource
 from ray.data._internal.execution.interfaces.task_context import TaskContext
-from ray.data._internal.planner.plan_write_op import generate_collect_write_stats_fn
+from ray.data._internal.planner.plan_write_op import generate_write_fn
 from ray.data.block import Block
 from ray.data.tests.conftest import *  # noqa
 from ray.data.tests.mock_http_server import *  # noqa
@@ -212,13 +212,9 @@ class TestWriteBigQuery:
         arr = pa.array([2, 4, 5, 100])
         block = pa.Table.from_arrays([arr], names=["data"])
         ctx = TaskContext(1, "")
-        bq_datasink.write(
-            blocks=[block],
-            ctx=ctx,
-        )
 
-        collect_stats_fn = generate_collect_write_stats_fn()
-        stats = collect_stats_fn([block], ctx)
+        write_fn = generate_write_fn(bq_datasink)
+        stats = write_fn(iter([block]), ctx)
         pd.testing.assert_frame_equal(
             next(stats),
             pd.DataFrame(
@@ -238,12 +234,9 @@ class TestWriteBigQuery:
         arr = pa.array([2, 4, 5, 100])
         block = pa.Table.from_arrays([arr], names=["data"])
         ctx = TaskContext(1, "")
-        bq_datasink.write(
-            blocks=[block],
-            ctx=ctx,
-        )
-        collect_stats_fn = generate_collect_write_stats_fn()
-        stats = collect_stats_fn([block], ctx)
+
+        write_fn = generate_write_fn(bq_datasink)
+        stats = write_fn(iter([block]), ctx)
         pd.testing.assert_frame_equal(
             next(stats),
             pd.DataFrame(

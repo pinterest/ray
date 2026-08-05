@@ -308,6 +308,54 @@ def test_write_concurrency():
     get_pyarrow_version() < parse_version("14.0.0"),
     reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
 )
+def test_write_tasks_same_partition_distinct_paths():
+    """Two write tasks writing the SAME partition must not collide on one object key.
+
+    Regression for the data-file naming collision: data files are named
+    ``00000-<task_id>-<write_uuid>.parquet``. ``_write_uuid`` is shared by all
+    write tasks, and pyiceberg restarts ``task_id`` at 0 on every
+    ``_dataframe_to_data_files`` call, so two tasks writing the same partition
+    used to produce the identical path ``<partition>/00000-0-<uuid>.parquet``. On
+    a last-writer-wins store (e.g. S3) the second writer silently overwrites the
+    first while both DataFile entries are still committed to the manifest, which
+    surfaces as an S3 416 (manifest size > surviving object) and silent data
+    loss. The fix folds the unique per-task index into the write uuid, so the two
+    tasks must now emit disjoint paths.
+    """
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data._internal.execution.interfaces import TaskContext
+
+    sink = IcebergDatasink(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+        catalog_kwargs=_CATALOG_KWARGS.copy(),
+        mode=SaveMode.APPEND,
+    )
+    sink.on_write_start()
+
+    # Both tasks write to the SAME partition (col_c == 1) with identical data;
+    # only the task index differs, exactly the condition that used to collide.
+    block = pa.Table.from_pydict(
+        {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [1, 1]},
+        schema=_SCHEMA,
+    )
+
+    files_task0 = sink.write([block], TaskContext(task_idx=0, op_name="write"))
+    files_task1 = sink.write([block], TaskContext(task_idx=1, op_name="write"))
+
+    paths0 = {data_file.file_path for data_file in files_task0}
+    paths1 = {data_file.file_path for data_file in files_task1}
+
+    assert paths0 and paths1, "each write task should emit at least one data file"
+    assert paths0.isdisjoint(paths1), (
+        "data-file paths collide across write tasks writing the same partition: "
+        f"{paths0 & paths1}"
+    )
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
 def test_predicate_pushdown():
     """Test that predicate pushdown works correctly with Iceberg datasource."""
     # Read the table and apply filters using Ray Data expressions

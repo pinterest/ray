@@ -34,8 +34,8 @@ def _staged_files(stage_dir):
     ]
 
 
-def _task_ctx(write_uuid="testuuid"):
-    return TaskContext(0, "Write", kwargs={WRITE_UUID_KWARG_NAME: write_uuid})
+def _task_ctx(write_uuid="testuuid", task_idx=0):
+    return TaskContext(task_idx, "Write", kwargs={WRITE_UUID_KWARG_NAME: write_uuid})
 
 
 def test_stream_writes_round_trip(ray_start_regular_shared, tmp_path):
@@ -135,8 +135,8 @@ def test_stream_writes_stage_dir_defaults_to_temp(tmp_path):
     assert ray.data.read_parquet(str(tmp_path)).count() == 2
 
 
-def test_stream_writes_staging_dir_is_unique_per_write(tmp_path, stage_dir):
-    """Separate writes stage under separate directories and don't collide."""
+def test_stream_writes_staging_dir_is_unique_per_task(tmp_path, stage_dir):
+    """Separate writes -- and separate tasks of one write -- stage under separate dirs."""
     datasink = ParquetDatasink(str(tmp_path), stream_writes=True)
 
     first = datasink._staging_dir(_task_ctx("uuid-one"))
@@ -144,8 +144,33 @@ def test_stream_writes_staging_dir_is_unique_per_write(tmp_path, stage_dir):
 
     assert first != second
     assert str(stage_dir) in first and str(stage_dir) in second
-    # Tasks of the same write share a directory; the filename keeps them distinct.
+    # A task owns its directory, so it can clean up without racing a sibling.
+    assert datasink._staging_dir(_task_ctx("uuid-one", task_idx=1)) != first
+    # A retry of the same task reuses it, overwriting only its own partial output.
     assert datasink._staging_dir(_task_ctx("uuid-one")) == first
+
+
+def test_stream_writes_finished_task_does_not_break_a_sibling(tmp_path, stage_dir):
+    """A task finishing mid-write doesn't remove a directory a sibling still needs.
+
+    The writer is opened lazily on the first non-empty block, so a sibling that hasn't
+    produced one yet is exactly the task a shared staging directory would strand.
+    """
+    datasink = ParquetDatasink(str(tmp_path / "out"), stream_writes=True)
+    datasink.on_write_start()
+
+    def blocks():
+        # No writer open yet: another task of the same write completes here.
+        datasink.write(iter([pa.table({"id": [0]})]), _task_ctx(task_idx=1))
+        yield pa.table({"id": [1, 2]})
+
+    datasink.write(blocks(), _task_ctx(task_idx=0))
+
+    written = sorted(
+        row["id"] for row in ray.data.read_parquet(str(tmp_path / "out")).take_all()
+    )
+    assert written == [0, 1, 2]
+    assert _staged_files(stage_dir) == []
 
 
 def test_stream_writes_empty_dataset_writes_no_file(ray_start_regular_shared, tmp_path):

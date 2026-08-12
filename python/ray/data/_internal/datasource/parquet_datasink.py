@@ -330,26 +330,37 @@ class ParquetDatasink(_FileDatasink):
                     pass
                 except Exception:
                     logger.exception(f"Failed to remove staged file {stage_path}.")
-                # Succeeds for whichever task finishes last; the others' dirs aren't
-                # empty yet.
-                try:
-                    os.rmdir(stage_dir)
-                except OSError:
-                    pass
+                # The task's own directory is now empty, so this succeeds. The parent
+                # (per-write) directory succeeds only for whichever task finishes last;
+                # the others still have live siblings in it.
+                for path in (stage_dir, os.path.dirname(stage_dir)):
+                    try:
+                        os.rmdir(path)
+                    except OSError:
+                        pass
 
     def _staging_dir(self, ctx: TaskContext) -> str:
         """Returns the directory used to stage this task's output before uploading.
 
         The path is namespaced by the per-write UUID so that concurrent or successive
         writes -- including separate Ray jobs sharing a node, and separate write calls
-        within one job -- never stage into the same directory. Combined with the
-        task-deterministic filename, that means a given stage path belongs to exactly
-        one write task, so a retry overwrites only its own partial output.
+        within one job -- never stage into the same directory, then by the task index so
+        that no two tasks of one write share a directory either. A task therefore owns
+        its directory outright: it can remove it on the way out without racing a sibling,
+        and combined with the task-deterministic filename a retry overwrites only its own
+        partial output.
+
+        Sharing one directory per write would mean the first task to finish removes a
+        directory its still-running siblings need. The writer is opened lazily on the
+        first non-empty block, so a task that has not produced one yet then fails to
+        create its staged file with `FileNotFoundError`.
         """
         stage_root = os.environ.get(STAGE_DIR_ENV_VAR) or os.path.join(
             tempfile.gettempdir(), DEFAULT_STAGE_DIR_NAME
         )
-        return os.path.join(stage_root, ctx.kwargs[WRITE_UUID_KWARG_NAME])
+        return os.path.join(
+            stage_root, ctx.kwargs[WRITE_UUID_KWARG_NAME], str(ctx.task_idx)
+        )
 
     def _upload_staged_file(self, stage_path: str, write_path: str) -> None:
         """Copies the finalized local file to `write_path` in chunks.

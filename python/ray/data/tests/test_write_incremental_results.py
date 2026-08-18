@@ -1,7 +1,6 @@
 import pytest
 
 import ray
-from ray.data.block import Block
 from ray.data._internal.execution.interfaces import TaskContext
 from ray.data.datasource.datasink import Datasink, WriteResult
 

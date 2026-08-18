@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
     from pyiceberg.expressions import BooleanExpression
     from pyiceberg.io import FileIO
-    from pyiceberg.manifest import DataFile
+    from pyiceberg.manifest import DataFile, ManifestFile
     from pyiceberg.table import Table, Transaction
     from pyiceberg.table.metadata import TableMetadata
 
@@ -144,7 +144,7 @@ def _write_manifests_task(
     io: "FileIO",
     snapshot_id: int,
     output_prefix: str,
-):
+) -> "List[ManifestFile]":
     from ray.data._internal.datasource.iceberg_manifest_commit import (
         write_manifests_for_bin,
     )
@@ -762,7 +762,7 @@ class IcebergDatasink(
         )
         txn.commit_transaction()
 
-    def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid):
+    def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid, table_metadata):
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
         node_id = ray.get_runtime_context().get_node_id()
@@ -770,7 +770,7 @@ class IcebergDatasink(
         if concurrency <= 0:
             concurrency = os.cpu_count() or 4
 
-        location = self._table.metadata.location
+        location = table_metadata.location
         options = {
             "num_cpus": 1,
             "scheduling_strategy": NodeAffinitySchedulingStrategy(
@@ -783,7 +783,7 @@ class IcebergDatasink(
             prefix = f"{location}/metadata/{commit_uuid}-m{i:06d}"
             pending.append(
                 _write_manifests_task.options(**options).remote(
-                    bin_path, self._table.metadata, self._table.io, snapshot_id, prefix
+                    bin_path, table_metadata, self._table.io, snapshot_id, prefix
                 )
             )
             if len(pending) >= concurrency:
@@ -791,6 +791,8 @@ class IcebergDatasink(
                 manifests.extend(m for r in ray.get(done) for m in r)
         manifests.extend(m for r in ray.get(pending) for m in r)
 
+        # Populated only after all bins are written; partial failures leave some
+        # manifests untracked (harmless orphans).
         self._written_manifest_paths = [m.manifest_path for m in manifests]
         return manifests
 
@@ -813,7 +815,7 @@ class IcebergDatasink(
             self._commit_uuid = uuid.uuid4()
             txn = self._table.transaction()
             manifests = self._write_manifests_parallel(
-                bins, self._commit_snapshot_id, self._commit_uuid
+                bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
             )
             apply_appended_manifests(
                 txn,

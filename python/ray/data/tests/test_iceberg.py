@@ -2513,6 +2513,64 @@ def test_write_append_spill_matches_stock(clean_table):
     get_pyarrow_version() < parse_version("14.0.0"),
     reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
 )
+def test_write_append_spill_schema_evolution_matches_stock(clean_table):
+    """Test spill path matches stock when schema evolves across blocks."""
+    from ray.data.context import DataContext
+
+    sql_catalog, table = clean_table
+
+    # Create heterogeneous Arrow tables: second is wider (has col_d)
+    tbl_first = pa.Table.from_pydict(
+        {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [10, 20]},
+        schema=pa.schema([
+            pa.field("col_a", pa.int32()),
+            pa.field("col_b", pa.string()),
+            pa.field("col_c", pa.int32()),
+        ]),
+    )
+    tbl_wider = pa.Table.from_pydict(
+        {"col_a": [3, 4], "col_b": ["c", "d"], "col_c": [30, 40], "col_d": ["x", "y"]},
+        schema=pa.schema([
+            pa.field("col_a", pa.int32()),
+            pa.field("col_b", pa.string()),
+            pa.field("col_c", pa.int32()),
+            pa.field("col_d", pa.string()),
+        ]),
+    )
+
+    # Flag OFF: stock path with heterogeneous schemas
+    ray.data.from_arrow([tbl_first, tbl_wider]).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+        catalog_kwargs=_CATALOG_KWARGS.copy(),
+    )
+    stock_rows = _read_from_iceberg(sort_by="col_a")
+    stock_schema_fields = set(stock_rows.columns)
+
+    # Reset table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+
+    # Flag ON: spill path with same heterogeneous schemas
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow([tbl_first, tbl_wider]).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    spilled_rows = _read_from_iceberg(sort_by="col_a")
+    spilled_schema_fields = set(spilled_rows.columns)
+
+    assert rows_same(stock_rows, spilled_rows)
+    assert stock_schema_fields == spilled_schema_fields
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
 def test_spill_path_does_not_accumulate_write_returns(clean_table, monkeypatch):
     from ray.data._internal.datasource import iceberg_datasink as ids
     from ray.data.context import DataContext

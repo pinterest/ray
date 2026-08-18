@@ -2374,6 +2374,68 @@ def test_write_manifests_for_bin_roundtrip(clean_table, tmp_path):
     assert all(e.status == ManifestEntryStatus.ADDED for e in entries)
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_apply_appended_manifests_matches_stock_append(clean_table, tmp_path):
+    import uuid
+
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        apply_appended_manifests,
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, _ = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    payload = create_pa_table()
+    meta = table.metadata
+
+    data_files = list(
+        _dataframe_to_data_files(table_metadata=meta, df=payload, io=table.io)
+    )
+    spiller = DataFileSpiller(
+        str(tmp_path), 10**9, 10**9, estimate_manifest_entry_size
+    )
+    spiller.add(data_files)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    commit_uuid = uuid.uuid4()
+    manifests = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/{commit_uuid}-m0"
+    )
+
+    txn = table.transaction()
+    apply_appended_manifests(
+        txn,
+        table.io,
+        meta.properties,
+        manifests,
+        snapshot_id,
+        snapshot_properties={},
+        branch="main",
+        commit_uuid=commit_uuid,
+    )
+    txn.commit_transaction()
+
+    injected = (
+        sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+        .scan()
+        .to_pandas()
+        .sort_values(["col_a", "col_b", "col_c"])
+        .reset_index(drop=True)
+    )
+    current = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    assert current.current_snapshot().snapshot_id == snapshot_id
+    assert len(injected) == payload.num_rows
+    assert injected["col_a"].tolist() == sorted(payload.column("col_a").to_pylist())
+
+
 if __name__ == "__main__":
     import sys
 

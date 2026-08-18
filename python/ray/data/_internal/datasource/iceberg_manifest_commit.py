@@ -93,3 +93,67 @@ def write_manifests_for_bin(
                 )
         manifests.append(writer.to_manifest_file())
     return manifests
+
+
+class _InjectManifestsMixin:
+    """Overrides the snapshot producer's added-manifest source with pre-written
+    manifests instead of buffering DataFiles in ``_added_data_files``."""
+
+    _injected_manifests: List["ManifestFile"] = ()
+
+    def _manifests(self):
+        # Feed our pre-written manifests through the producer's own
+        # _process_manifests so the merge variant still runs its merge manager
+        # and the fast variant passes them through unchanged.
+        return self._process_manifests(
+            list(self._injected_manifests) + self._existing_manifests()
+        )
+
+
+def _injected_producer_cls(merge_enabled: bool):
+    from pyiceberg.table.update.snapshot import _FastAppendFiles, _MergeAppendFiles
+
+    base = _MergeAppendFiles if merge_enabled else _FastAppendFiles
+    return type(f"_Injected{base.__name__}", (_InjectManifestsMixin, base), {})
+
+
+def apply_appended_manifests(
+    txn,
+    io: "FileIO",
+    table_properties: Dict[str, str],
+    added_manifests: List["ManifestFile"],
+    snapshot_id: int,
+    snapshot_properties: Dict[str, str],
+    branch: str,
+    commit_uuid,
+) -> None:
+    """Apply an APPEND snapshot built from ``added_manifests`` to ``txn``.
+
+    Mirrors ``Transaction._append_snapshot_producer``'s fast-vs-merge choice and
+    forces the pre-allocated ``snapshot_id``. The caller commits the transaction.
+    """
+    from pyiceberg.table import TableProperties
+    from pyiceberg.table.snapshots import Operation
+    from pyiceberg.utils.properties import property_as_bool
+
+    merge_enabled = property_as_bool(
+        table_properties,
+        TableProperties.MANIFEST_MERGE_ENABLED,
+        TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT,
+    )
+    producer_cls = _injected_producer_cls(merge_enabled)
+    producer = producer_cls(
+        Operation.APPEND,
+        txn,
+        io,
+        commit_uuid=commit_uuid,
+        snapshot_properties=snapshot_properties,
+        branch=branch,
+    )
+    producer._injected_manifests = list(added_manifests)
+    producer._snapshot_id = snapshot_id
+    with producer:
+        # No append_data_file calls: _manifests() supplies our manifests.
+        # __exit__ runs _commit(), applying the AddSnapshot update + requirements
+        # to the transaction.
+        pass

@@ -2475,6 +2475,40 @@ def test_datasink_on_write_result_spills(clean_table):
         DataContext.get_current().iceberg_config.commit_spill_enabled = False
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_append_spill_matches_stock(clean_table):
+    from ray.data.context import DataContext
+
+    payload = create_pa_table()
+
+    # Flag OFF: stock path.
+    ray.data.from_arrow(payload).repartition(4).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+        catalog_kwargs=_CATALOG_KWARGS.copy(),
+    )
+    stock = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+
+    # Reset table, then flag ON: spill path.
+    sql_catalog, table = clean_table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(payload).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    spilled = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+    assert rows_same(stock, spilled)
+
+
 if __name__ == "__main__":
     import sys
 

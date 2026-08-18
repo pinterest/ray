@@ -20,8 +20,10 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from pyiceberg.catalog import Catalog
     from pyiceberg.expressions import BooleanExpression
+    from pyiceberg.io import FileIO
     from pyiceberg.manifest import DataFile
     from pyiceberg.table import Table, Transaction
+    from pyiceberg.table.metadata import TableMetadata
 
     from ray.data.expressions import Expr
 
@@ -133,6 +135,23 @@ def _commit_upsert_task(
 
     # Append new data files (includes updates and inserts) and commit
     _append_and_commit(txn, data_files, snapshot_properties)
+
+
+@ray.remote
+def _write_manifests_task(
+    bin_path: str,
+    table_metadata: "TableMetadata",
+    io: "FileIO",
+    snapshot_id: int,
+    output_prefix: str,
+):
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        write_manifests_for_bin,
+    )
+
+    return write_manifests_for_bin(
+        bin_path, table_metadata, io, snapshot_id, output_prefix
+    )
 
 
 @DeveloperAPI
@@ -580,6 +599,10 @@ class IcebergDatasink(
         Collects all DataFile objects from all workers and performs a single
         atomic commit based on the configured mode.
         """
+        if self.collect_write_results_incrementally and self._used_spill_path:
+            self._commit_spilled_append()
+            return
+
         # Reload table to get latest metadata
         self._reload_table()
 
@@ -738,3 +761,78 @@ class IcebergDatasink(
             **self._overwrite_kwargs,
         )
         txn.commit_transaction()
+
+    def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid):
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        node_id = ray.get_runtime_context().get_node_id()
+        concurrency = self._data_context.iceberg_config.commit_manifest_max_concurrency
+        if concurrency <= 0:
+            concurrency = os.cpu_count() or 4
+
+        location = self._table.metadata.location
+        options = {
+            "num_cpus": 1,
+            "scheduling_strategy": NodeAffinitySchedulingStrategy(
+                node_id, soft=False
+            ),
+        }
+
+        pending, manifests = [], []
+        for i, bin_path in enumerate(bins):
+            prefix = f"{location}/metadata/{commit_uuid}-m{i:06d}"
+            pending.append(
+                _write_manifests_task.options(**options).remote(
+                    bin_path, self._table.metadata, self._table.io, snapshot_id, prefix
+                )
+            )
+            if len(pending) >= concurrency:
+                done, pending = ray.wait(pending, num_returns=1, fetch_local=True)
+                manifests.extend(m for r in ray.get(done) for m in r)
+        manifests.extend(m for r in ray.get(pending) for m in r)
+
+        self._written_manifest_paths = [m.manifest_path for m in manifests]
+        return manifests
+
+    def _commit_spilled_append(self) -> None:
+        import time
+
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            apply_appended_manifests,
+        )
+
+        t_start = time.perf_counter()
+        bins = self._spiller.close()
+        logger.info(
+            "[spill commit] %d data files across %d bin(s)",
+            self._num_spilled_data_files,
+            len(bins),
+        )
+        try:
+            self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
+            self._commit_uuid = uuid.uuid4()
+            txn = self._table.transaction()
+            manifests = self._write_manifests_parallel(
+                bins, self._commit_snapshot_id, self._commit_uuid
+            )
+            apply_appended_manifests(
+                txn,
+                self._table.io,
+                self._table.metadata.properties,
+                manifests,
+                self._commit_snapshot_id,
+                self._snapshot_properties,
+                "main",
+                self._commit_uuid,
+            )
+            txn.commit_transaction()
+            logger.info(
+                "[spill commit] committed in %.2fs", time.perf_counter() - t_start
+            )
+        finally:
+            self._spiller.cleanup()
+            if self._spill_dir:
+                try:
+                    os.rmdir(self._spill_dir)
+                except OSError:
+                    pass

@@ -2328,6 +2328,52 @@ def test_iceberg_config_commit_spill_defaults():
     assert cfg2.commit_manifest_max_concurrency == 4
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_manifests_for_bin_roundtrip(clean_table, tmp_path):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+    from pyiceberg.manifest import ManifestEntryStatus
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, table = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    meta = table.metadata
+    data_files = list(
+        _dataframe_to_data_files(
+            table_metadata=meta, df=create_pa_table(), io=table.io
+        )
+    )
+    assert len(data_files) > 0
+
+    spiller = DataFileSpiller(
+        str(tmp_path),
+        target_size_bytes=10**9,
+        max_files_per_bin=10**9,
+        size_of=estimate_manifest_entry_size,
+    )
+    spiller.add(data_files)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    manifests = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/m0"
+    )
+    assert len(manifests) >= 1
+
+    total_added = sum(m.added_files_count for m in manifests)
+    assert total_added == len(data_files)
+    entries = [e for m in manifests for e in m.fetch_manifest_entry(table.io)]
+    assert all(e.snapshot_id == snapshot_id for e in entries)
+    assert all(e.status == ManifestEntryStatus.ADDED for e in entries)
+
+
 if __name__ == "__main__":
     import sys
 

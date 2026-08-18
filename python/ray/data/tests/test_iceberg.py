@@ -2509,6 +2509,76 @@ def test_write_append_spill_matches_stock(clean_table):
     assert rows_same(stock, spilled)
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_spill_path_does_not_accumulate_write_returns(clean_table, monkeypatch):
+    from ray.data._internal.datasource import iceberg_datasink as ids
+    from ray.data.context import DataContext
+
+    seen = {}
+    original = ids.IcebergDatasink.on_write_complete
+
+    def spy(self, write_result):
+        seen["write_returns"] = list(write_result.write_returns)
+        seen["num_rows"] = write_result.num_rows
+        return original(self, write_result)
+
+    monkeypatch.setattr(ids.IcebergDatasink, "on_write_complete", spy)
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(create_pa_table()).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert seen["write_returns"] == []  # driver did not accumulate data files
+    assert seen["num_rows"] == create_pa_table().num_rows
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_spill_commit_failure_cleans_spill_dir(clean_table, monkeypatch):
+    from ray.data._internal.datasource import iceberg_datasink as ids
+    from ray.data.context import DataContext
+
+    captured = {}
+    original_commit = ids.IcebergDatasink._commit_spilled_append
+
+    def boom(self):
+        captured["spill_dir"] = None
+
+        def fail(*a, **k):
+            captured["spill_dir"] = self._spill_dir
+            raise RuntimeError("injected commit failure")
+
+        monkeypatch.setattr(self, "_write_manifests_parallel", fail)
+        return original_commit(self)
+
+    monkeypatch.setattr(ids.IcebergDatasink, "_commit_spilled_append", boom)
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        with pytest.raises(RuntimeError, match="injected commit failure"):
+            ray.data.from_arrow(create_pa_table()).repartition(2).write_iceberg(
+                table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+            )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert captured["spill_dir"] is not None
+    assert not os.path.exists(captured["spill_dir"])  # spill cleaned in finally
+
+
 if __name__ == "__main__":
     import sys
 

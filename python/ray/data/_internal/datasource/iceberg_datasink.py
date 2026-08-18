@@ -836,3 +836,28 @@ class IcebergDatasink(
                     os.rmdir(self._spill_dir)
                 except OSError:
                     pass
+
+    def on_write_failed(self, error: Exception) -> None:
+        # Best-effort cleanup of spill files and orphan manifests from a failed
+        # spill commit. Orphan manifests are harmless (unreferenced), but we
+        # remove what we can. Never raise from cleanup.
+        if self._spiller is not None:
+            try:
+                self._spiller.cleanup()
+            except Exception:
+                logger.debug("[spill commit] spiller cleanup failed", exc_info=True)
+        io = getattr(self._table, "io", None) if self._table is not None else None
+        for path in self._written_manifest_paths:
+            if io is None:
+                break
+            try:
+                io.delete(path)
+            except Exception:
+                logger.debug(
+                    "[spill commit] orphan manifest delete failed: %s", path
+                )
+        if self._spill_dir:
+            try:
+                os.rmdir(self._spill_dir)
+            except OSError:
+                pass

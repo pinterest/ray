@@ -97,6 +97,20 @@ class Datasink(Generic[WriteReturnType]):
         """
         pass
 
+    @property
+    def collect_write_results_incrementally(self) -> bool:
+        """If ``True``, results are streamed to :meth:`on_write_result` as each
+        write task completes, and ``on_write_complete`` receives a ``WriteResult``
+        with empty ``write_returns``. Datasinks that spill/aggregate incrementally
+        override this to avoid the driver retaining every write return."""
+        return False
+
+    def on_write_result(self, write_return: WriteReturnType) -> None:
+        """Called once per completed write task, in arrival order, during
+        collection. Only invoked when ``collect_write_results_incrementally`` is
+        ``True``. Default is a no-op."""
+        pass
+
     def get_name(self) -> str:
         """Return a human-readable name for this datasink.
 

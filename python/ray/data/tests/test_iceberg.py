@@ -2315,6 +2315,19 @@ class TestDynamicOverwrite:
         assert rows_same(result, expected)
 
 
+def test_iceberg_config_commit_spill_defaults():
+    from ray.data.context import IcebergConfig
+
+    cfg = IcebergConfig()
+    assert cfg.commit_spill_enabled is False
+    assert cfg.commit_manifest_max_concurrency == 0
+    assert cfg.commit_spill_dir is None
+
+    cfg2 = IcebergConfig(commit_spill_enabled=True, commit_manifest_max_concurrency=4)
+    assert cfg2.commit_spill_enabled is True
+    assert cfg2.commit_manifest_max_concurrency == 4
+
+
 if __name__ == "__main__":
     import sys
 

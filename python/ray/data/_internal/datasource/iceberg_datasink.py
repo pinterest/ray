@@ -3,6 +3,8 @@ Module to write a Ray Dataset into an iceberg table, by using the Ray Datasink A
 """
 import itertools
 import logging
+import os
+import tempfile
 import uuid
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
@@ -199,7 +201,8 @@ class IcebergDatasink(
         # Resolve case_sensitive: per-operation kwargs override DataContext global
         from ray.data import DataContext
 
-        ctx_case_sensitive = DataContext.get_current().iceberg_case_sensitive
+        self._data_context = DataContext.get_current()
+        ctx_case_sensitive = self._data_context.iceberg_case_sensitive
         if self._mode == SaveMode.UPSERT:
             self._case_sensitive = self._upsert_kwargs.pop(
                 "case_sensitive", ctx_case_sensitive
@@ -255,15 +258,44 @@ class IcebergDatasink(
         self._table: "Table" = None
         self._write_uuid: uuid.UUID = None
 
+        # Driver-only state for the incremental spill path (Phase 1: APPEND).
+        self._spiller = None
+        self._spill_dir = None
+        self._running_schema = None
+        self._used_spill_path = False
+        self._num_spilled_data_files = 0
+        self._commit_snapshot_id = None
+        self._commit_uuid = None
+        self._written_manifest_paths = []
+
     def __getstate__(self) -> dict:
-        """Exclude `_table` during pickling."""
+        """Exclude driver-only state during pickling."""
         state = self.__dict__.copy()
-        state.pop("_table", None)
+        for key in (
+            "_table",
+            "_spiller",
+            "_spill_dir",
+            "_running_schema",
+            "_used_spill_path",
+            "_num_spilled_data_files",
+            "_commit_snapshot_id",
+            "_commit_uuid",
+            "_written_manifest_paths",
+        ):
+            state.pop(key, None)
         return state
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         self._table = None
+        self._spiller = None
+        self._spill_dir = None
+        self._running_schema = None
+        self._used_spill_path = False
+        self._num_spilled_data_files = 0
+        self._commit_snapshot_id = None
+        self._commit_uuid = None
+        self._written_manifest_paths = []
 
     def _get_catalog(self) -> "Catalog":
         from pyiceberg import catalog
@@ -355,6 +387,52 @@ class IcebergDatasink(
                         max_retries,
                     )
                     raise
+
+    _MANIFEST_MAX_FILES_PER_BIN = 100_000
+
+    @property
+    def collect_write_results_incrementally(self) -> bool:
+        # Phase 1: only APPEND uses the spill path; other modes keep today's path.
+        return (
+            self._data_context.iceberg_config.commit_spill_enabled
+            and self._mode == SaveMode.APPEND
+        )
+
+    def _ensure_spiller(self) -> None:
+        if self._spiller is not None:
+            return
+        from pyiceberg.table import TableProperties
+        from pyiceberg.utils.properties import property_as_int
+
+        from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            estimate_manifest_entry_size,
+        )
+
+        target = property_as_int(
+            self._table.metadata.properties,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT,
+        )
+        self._spill_dir = tempfile.mkdtemp(
+            prefix="ray_iceberg_commit_",
+            dir=self._data_context.iceberg_config.commit_spill_dir,
+        )
+        self._spiller = DataFileSpiller(
+            self._spill_dir,
+            target_size_bytes=target,
+            max_files_per_bin=self._MANIFEST_MAX_FILES_PER_BIN,
+            size_of=estimate_manifest_entry_size,
+        )
+
+    def on_write_result(self, write_return: List["DataFile"]) -> None:
+        # 2.52.1 write() returns List[DataFile] for APPEND (not IcebergWriteResult).
+        if not write_return:
+            return
+        self._ensure_spiller()
+        self._spiller.add(write_return)
+        self._num_spilled_data_files += len(write_return)
+        self._used_spill_path = True
 
     def on_write_start(self) -> None:
         """Initialize table for writing and create a shared write UUID."""

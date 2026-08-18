@@ -2436,6 +2436,45 @@ def test_apply_appended_manifests_matches_stock_append(clean_table, tmp_path):
     assert injected["col_a"].tolist() == sorted(payload.column("col_a").to_pylist())
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_datasink_on_write_result_spills(clean_table):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data._internal.savemode import SaveMode
+    from ray.data.context import DataContext
+
+    DataContext.get_current().iceberg_config.commit_spill_enabled = True
+    try:
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.APPEND,
+        )
+        assert sink.collect_write_results_incrementally is True
+        sink.on_write_start()
+
+        pa_table = create_pa_table()
+        data_files = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=pa_table, io=sink._table.io
+            )
+        )
+        sink.on_write_result(data_files)
+        sink.on_write_result(data_files)
+
+        assert sink._used_spill_path is True
+        assert sink._num_spilled_data_files == 2 * len(data_files)
+        bins = sink._spiller.close()
+        assert len(bins) >= 1
+        sink._spiller.cleanup()
+    finally:
+        DataContext.get_current().iceberg_config.commit_spill_enabled = False
+
+
 if __name__ == "__main__":
     import sys
 

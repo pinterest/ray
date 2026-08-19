@@ -892,7 +892,9 @@ class IcebergDatasink(
                 task.file
                 for task in self._table.scan(
                     row_filter=delete_filter, case_sensitive=self._case_sensitive
-                ).plan_files()
+                )
+                .use_ref(branch)
+                .plan_files()
             ]
 
             self._commit_snapshot_id = self._table.metadata.new_snapshot_id()

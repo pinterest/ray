@@ -286,6 +286,7 @@ class IcebergDatasink(
         self._commit_snapshot_id = None
         self._commit_uuid = None
         self._written_manifest_paths = []
+        self._dynamic_partition_keys = set()
 
     def __getstate__(self) -> dict:
         """Exclude driver-only state during pickling."""
@@ -300,6 +301,7 @@ class IcebergDatasink(
             "_commit_snapshot_id",
             "_commit_uuid",
             "_written_manifest_paths",
+            "_dynamic_partition_keys",
         ):
             state.pop(key, None)
         return state
@@ -315,6 +317,7 @@ class IcebergDatasink(
         self._commit_snapshot_id = None
         self._commit_uuid = None
         self._written_manifest_paths = []
+        self._dynamic_partition_keys = set()
 
     def _get_catalog(self) -> "Catalog":
         from pyiceberg import catalog
@@ -411,10 +414,10 @@ class IcebergDatasink(
 
     @property
     def collect_write_results_incrementally(self) -> bool:
-        # Phase 1: only APPEND uses the spill path; other modes keep today's path.
-        return (
-            self._data_context.iceberg_config.commit_spill_enabled
-            and self._mode == SaveMode.APPEND
+        return self._data_context.iceberg_config.commit_spill_enabled and self._mode in (
+            SaveMode.APPEND,
+            SaveMode.OVERWRITE,
+            SaveMode.DYNAMIC_OVERWRITE,
         )
 
     def _ensure_spiller(self) -> None:
@@ -451,6 +454,10 @@ class IcebergDatasink(
         self._ensure_spiller()
         self._spiller.add(write_return)
         self._num_spilled_data_files += len(write_return)
+        if self._mode == SaveMode.DYNAMIC_OVERWRITE:
+            positions = self._identity_positions()
+            for data_file in write_return:
+                self._dynamic_partition_keys.add(self._identity_key(data_file, positions))
         self._used_spill_path = True
 
     def on_write_start(self) -> None:

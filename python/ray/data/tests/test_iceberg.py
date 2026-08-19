@@ -2723,6 +2723,48 @@ def test_apply_overwrite_manifests_single_overwrite_snapshot(clean_table, tmp_pa
     assert len(rows) == payload.num_rows  # replaced, not appended
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_gate_and_dynamic_key_accumulation(clean_table):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data._internal.savemode import SaveMode
+    from ray.data.context import DataContext
+
+    DataContext.get_current().iceberg_config.commit_spill_enabled = True
+    try:
+        for mode in (SaveMode.APPEND, SaveMode.OVERWRITE, SaveMode.DYNAMIC_OVERWRITE):
+            sink = IcebergDatasink(
+                table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+                mode=mode,
+            )
+            assert sink.collect_write_results_incrementally is True
+
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.DYNAMIC_OVERWRITE,
+        )
+        sink.on_write_start()
+        df = create_pa_table()  # col_c in 0..9
+        dfs = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=df, io=sink._table.io
+            )
+        )
+        sink.on_write_result(dfs)
+        positions = sink._identity_positions()
+        assert sink._dynamic_partition_keys == {
+            sink._identity_key(f, positions) for f in dfs
+        }
+    finally:
+        DataContext.get_current().iceberg_config.commit_spill_enabled = False
+
+
 if __name__ == "__main__":
     import sys
 

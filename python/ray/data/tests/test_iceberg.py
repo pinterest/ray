@@ -2314,6 +2314,36 @@ class TestDynamicOverwrite:
         )
         assert rows_same(result, expected)
 
+    @pytest.mark.skipif(
+        get_pyarrow_version() < parse_version("14.0.0"),
+        reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+    )
+    def test_identity_filter_helpers_match_legacy(self, clean_table):
+        from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+        from ray.data._internal.savemode import SaveMode
+
+        sql_catalog, _ = clean_table
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.DYNAMIC_OVERWRITE,
+        )
+        sink._table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+
+        df = create_pa_table()  # partitioned by col_c (identity)
+        dfs = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=df, io=sink._table.io
+            )
+        )
+        positions = sink._identity_positions()
+        keys = {sink._identity_key(f, positions) for f in dfs}
+        from_keys = sink._identity_filter_from_keys(keys, positions)
+        legacy = sink._build_identity_partition_filter(dfs)
+        assert str(from_keys) == str(legacy)
+
 
 def test_iceberg_config_commit_spill_defaults():
     from ray.data.context import IcebergConfig

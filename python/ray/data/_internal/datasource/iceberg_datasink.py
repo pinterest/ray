@@ -698,6 +698,39 @@ class IcebergDatasink(
         # Append new data files and commit
         _append_and_commit(txn, data_files, self._snapshot_properties)
 
+    def _identity_positions(self):
+        from pyiceberg.transforms import IdentityTransform
+
+        spec = self._table.metadata.spec()
+        schema = self._table.metadata.schema()
+        return [
+            (pos, schema.find_field(field.source_id).name)
+            for pos, field in enumerate(spec.fields)
+            if isinstance(field.transform, IdentityTransform)
+        ]
+
+    def _identity_key(self, data_file, positions):
+        return tuple(data_file.partition[pos] for pos, _ in positions)
+
+    def _identity_filter_from_keys(self, keys, positions):
+        from pyiceberg.expressions import (
+            AlwaysFalse, And, EqualTo, IsNull, Or, Reference,
+        )
+
+        expr = AlwaysFalse()
+        for key in keys:
+            match = None
+            for (_, name), value in zip(positions, key):
+                predicate = (
+                    EqualTo(Reference(name), value)
+                    if value is not None
+                    else IsNull(Reference(name))
+                )
+                match = predicate if match is None else And(match, predicate)
+            if match is not None:
+                expr = Or(expr, match)
+        return expr
+
     def _build_identity_partition_filter(
         self, data_files: List["DataFile"]
     ) -> "BooleanExpression":
@@ -708,46 +741,9 @@ class IcebergDatasink(
         OR-ed together. Non-identity partition fields (bucket/truncate/etc.) are
         ignored -- deleting the identity partition sweeps all of its buckets.
         """
-        from pyiceberg.expressions import (
-            AlwaysFalse,
-            And,
-            EqualTo,
-            IsNull,
-            Or,
-            Reference,
-        )
-        from pyiceberg.transforms import IdentityTransform
-
-        spec = self._table.metadata.spec()
-        schema = self._table.metadata.schema()
-
-        # (position in the partition record, source column name) for identity fields
-        identity_positions = [
-            (pos, schema.find_field(field.source_id).name)
-            for pos, field in enumerate(spec.fields)
-            if isinstance(field.transform, IdentityTransform)
-        ]
-
-        expr: "BooleanExpression" = AlwaysFalse()
-        seen = set()
-        for data_file in data_files:
-            # Distinct identity-partition value tuple for this file
-            key = tuple(data_file.partition[pos] for pos, _ in identity_positions)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            match = None
-            for (_, name), value in zip(identity_positions, key):
-                predicate = (
-                    EqualTo(Reference(name), value)
-                    if value is not None
-                    else IsNull(Reference(name))
-                )
-                match = predicate if match is None else And(match, predicate)
-            if match is not None:
-                expr = Or(expr, match)
-        return expr
+        positions = self._identity_positions()
+        keys = {self._identity_key(f, positions) for f in data_files}
+        return self._identity_filter_from_keys(keys, positions)
 
     def _commit_dynamic_overwrite(self, data_files: List["DataFile"]) -> None:
         """Commit a dynamic partition overwrite as a single OVERWRITE snapshot."""

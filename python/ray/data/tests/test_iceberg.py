@@ -2717,9 +2717,9 @@ def test_spill_commit_failure_cleans_spill_dir(clean_table, monkeypatch):
     from ray.data.context import DataContext
 
     captured = {}
-    original_commit = ids.IcebergDatasink._commit_spilled_append
+    original_commit = ids.IcebergDatasink._commit_spilled
 
-    def boom(self):
+    def boom(self, stage_delete=None):
         captured["spill_dir"] = None
 
         def fail(*a, **k):
@@ -2727,9 +2727,9 @@ def test_spill_commit_failure_cleans_spill_dir(clean_table, monkeypatch):
             raise RuntimeError("injected commit failure")
 
         monkeypatch.setattr(self, "_write_manifests_parallel", fail)
-        return original_commit(self)
+        return original_commit(self, stage_delete=stage_delete)
 
-    monkeypatch.setattr(ids.IcebergDatasink, "_commit_spilled_append", boom)
+    monkeypatch.setattr(ids.IcebergDatasink, "_commit_spilled", boom)
 
     ctx = DataContext.get_current()
     ctx.iceberg_config.commit_spill_enabled = True

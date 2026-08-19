@@ -43,6 +43,30 @@ def _avro_codec(table_metadata: "TableMetadata") -> str:
     )
 
 
+def _spec_id_of(data_file, default_spec_id: int) -> int:
+    """Resolve a DataFile's partition spec, matching stock fast-append.
+
+    Stock pyiceberg 0.11.0 stores ``spec_id`` as a pydantic field. Pinterest's
+    Record-based DataFile keeps it as a runtime ``_spec_id`` that ``from_args``
+    drops (it is not an Avro/manifest field). ``_FastAppendFiles._manifests``
+    never reads ``data_file.spec_id`` — it uses ``table_metadata.spec()``.
+    """
+    spec_id = getattr(data_file, "_spec_id", None)
+    if spec_id is None:
+        # Property access raises on Pinterest DataFile when _spec_id was never set.
+        try:
+            spec_id = data_file.spec_id
+        except AttributeError:
+            spec_id = None
+    if spec_id is None:
+        spec_id = default_spec_id
+        try:
+            data_file.spec_id = spec_id
+        except (AttributeError, TypeError):
+            pass
+    return spec_id
+
+
 def write_manifests_for_bin(
     bin_path: str,
     table_metadata: "TableMetadata",
@@ -63,9 +87,10 @@ def write_manifests_for_bin(
     )
 
     data_files = read_spill_bin(bin_path)
+    default_spec_id = table_metadata.default_spec_id
     by_spec: Dict[int, List] = defaultdict(list)
     for data_file in data_files:
-        by_spec[data_file.spec_id].append(data_file)
+        by_spec[_spec_id_of(data_file, default_spec_id)].append(data_file)
 
     schema = table_metadata.schema()
     specs = table_metadata.specs()

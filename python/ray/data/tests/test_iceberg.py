@@ -2680,7 +2680,7 @@ def test_apply_overwrite_manifests_single_overwrite_snapshot(clean_table, tmp_pa
 
     txn = table.transaction()
     apply_overwrite_manifests(
-        txn, table.io, meta.properties, manifests, existing, snapshot_id,
+        txn, table.io, manifests, existing, snapshot_id,
         snapshot_properties={}, branch="main", commit_uuid=commit_uuid,
     )
     txn.commit_transaction()

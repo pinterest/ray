@@ -207,7 +207,6 @@ def _injected_overwrite_cls():
 def apply_overwrite_manifests(
     txn,
     io: "FileIO",
-    table_properties: Dict[str, str],
     added_manifests: List["ManifestFile"],
     deleted_data_files: List["DataFile"],
     snapshot_id: int,

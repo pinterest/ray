@@ -2637,6 +2637,62 @@ def test_spill_commit_failure_cleans_spill_dir(clean_table, monkeypatch):
     assert not os.path.exists(captured["spill_dir"])  # spill cleaned in finally
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_apply_overwrite_manifests_single_overwrite_snapshot(clean_table, tmp_path):
+    import uuid
+
+    from pyiceberg.expressions import AlwaysTrue
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        apply_overwrite_manifests,
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, _ = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    # Seed existing data so the branch has a snapshot (=> OVERWRITE, not APPEND).
+    table.append(create_pa_table())
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    snaps_before = len(table.snapshots())
+
+    # Existing files to delete = everything (full overwrite).
+    existing = [t.file for t in table.scan(row_filter=AlwaysTrue()).plan_files()]
+    assert existing
+
+    payload = create_pa_table()
+    meta = table.metadata
+    dfs = list(_dataframe_to_data_files(table_metadata=meta, df=payload, io=table.io))
+    spiller = DataFileSpiller(str(tmp_path), 10**9, 10**9, estimate_manifest_entry_size)
+    spiller.add(dfs)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    commit_uuid = uuid.uuid4()
+    manifests = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/{commit_uuid}-m0"
+    )
+
+    txn = table.transaction()
+    apply_overwrite_manifests(
+        txn, table.io, meta.properties, manifests, existing, snapshot_id,
+        snapshot_properties={}, branch="main", commit_uuid=commit_uuid,
+    )
+    txn.commit_transaction()
+
+    reloaded = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    assert reloaded.current_snapshot().snapshot_id == snapshot_id
+    assert reloaded.current_snapshot().summary.operation.value == "overwrite"
+    assert len(reloaded.snapshots()) == snaps_before + 1
+    rows = reloaded.scan().to_pandas()
+    assert len(rows) == payload.num_rows  # replaced, not appended
+
+
 if __name__ == "__main__":
     import sys
 

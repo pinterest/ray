@@ -11,7 +11,7 @@ from ray.data._internal.datasource.iceberg_commit_spill import read_spill_bin
 
 if TYPE_CHECKING:
     from pyiceberg.io import FileIO
-    from pyiceberg.manifest import ManifestFile
+    from pyiceberg.manifest import DataFile, ManifestFile
     from pyiceberg.table.metadata import TableMetadata
 
 
@@ -181,4 +181,65 @@ def apply_appended_manifests(
         # No append_data_file calls: _manifests() supplies our manifests.
         # __exit__ runs _commit(), applying the AddSnapshot update + requirements
         # to the transaction.
+        pass
+
+
+class _InjectOverwriteMixin:
+    """Overwrite producer whose *added* side is pre-written manifests.
+
+    `_added_data_files` stays empty; the base `_manifests()` therefore contributes
+    only the delete + (rewritten) existing manifests, and we prepend our pre-written
+    added manifests. Reuses the producer's own delete/existing handling.
+    """
+
+    _injected_manifests: List["ManifestFile"] = ()
+
+    def _manifests(self):
+        return list(self._injected_manifests) + super()._manifests()
+
+
+def _injected_overwrite_cls():
+    from pyiceberg.table.update.snapshot import _OverwriteFiles
+
+    return type("_InjectedOverwriteFiles", (_InjectOverwriteMixin, _OverwriteFiles), {})
+
+
+def apply_overwrite_manifests(
+    txn,
+    io: "FileIO",
+    table_properties: Dict[str, str],
+    added_manifests: List["ManifestFile"],
+    deleted_data_files: List["DataFile"],
+    snapshot_id: int,
+    snapshot_properties: Dict[str, str],
+    branch: str,
+    commit_uuid,
+) -> None:
+    """Stage a single OVERWRITE snapshot on ``txn``: delete ``deleted_data_files`` and
+    add ``added_manifests`` (pre-written). The caller commits the transaction."""
+    from pyiceberg.table.snapshots import Operation
+
+    # OVERWRITE when the branch already has a snapshot, else APPEND (mirrors
+    # UpdateSnapshot.overwrite()).
+    operation = (
+        Operation.OVERWRITE
+        if txn.table_metadata.snapshot_by_name(name=branch) is not None
+        else Operation.APPEND
+    )
+    producer_cls = _injected_overwrite_cls()
+    producer = producer_cls(
+        operation,
+        txn,
+        io,
+        commit_uuid=commit_uuid,
+        snapshot_properties=snapshot_properties,
+        branch=branch,
+    )
+    producer._injected_manifests = list(added_manifests)
+    producer._snapshot_id = snapshot_id
+    for data_file in deleted_data_files:
+        producer.delete_data_file(data_file)
+    with producer:
+        # No append_data_file / append_manifest calls: _manifests() supplies the
+        # added manifests; __exit__ runs _commit(), staging the snapshot on txn.
         pass

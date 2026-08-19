@@ -2543,6 +2543,49 @@ def test_write_append_spill_matches_stock(clean_table):
     get_pyarrow_version() < parse_version("14.0.0"),
     reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
 )
+@pytest.mark.parametrize("overwrite_filter", [None, col("col_c") >= 5])
+def test_write_overwrite_spill_matches_stock(clean_table, overwrite_filter):
+    from ray.data.context import DataContext
+
+    seed = create_pa_table()
+    payload = pa.Table.from_pydict(
+        {"col_a": list(range(50)), "col_b": ["z"] * 50, "col_c": [5] * 50},
+        schema=_SCHEMA,
+    )
+    kwargs = {} if overwrite_filter is None else {"overwrite_filter": overwrite_filter}
+
+    # Stock (flag off)
+    ray.data.from_arrow(seed).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy()
+    )
+    ray.data.from_arrow(payload).repartition(4).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy(),
+        mode=SaveMode.OVERWRITE, **kwargs,
+    )
+    stock = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+
+    sql_catalog, _ = clean_table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(seed).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy()
+        )
+        ray.data.from_arrow(payload).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.OVERWRITE, **kwargs,
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+    spilled = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+    assert rows_same(stock, spilled)
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
 def test_write_append_spill_schema_evolution_matches_stock(clean_table):
     """Test spill path matches stock when schema evolves across blocks."""
     from ray.data.context import DataContext

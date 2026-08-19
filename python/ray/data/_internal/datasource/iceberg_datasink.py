@@ -607,7 +607,12 @@ class IcebergDatasink(
         atomic commit based on the configured mode.
         """
         if self.collect_write_results_incrementally and self._used_spill_path:
-            self._commit_spilled_append()
+            if self._mode == SaveMode.OVERWRITE:
+                self._commit_spilled_overwrite()
+            elif self._mode == SaveMode.DYNAMIC_OVERWRITE:
+                self._commit_spilled_dynamic_overwrite()
+            else:
+                self._commit_spilled()
             return
 
         # Reload table to get latest metadata
@@ -799,7 +804,7 @@ class IcebergDatasink(
         self._written_manifest_paths = [m.manifest_path for m in manifests]
         return manifests
 
-    def _commit_spilled_append(self) -> None:
+    def _commit_spilled(self, stage_delete=None) -> None:
         import time
 
         from ray.data._internal.datasource.iceberg_manifest_commit import (
@@ -813,10 +818,13 @@ class IcebergDatasink(
             self._num_spilled_data_files,
             len(bins),
         )
+        branch = self._overwrite_kwargs.get("branch", "main")
         try:
             self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
             self._commit_uuid = uuid.uuid4()
             txn = self._table.transaction()
+            if stage_delete is not None:
+                stage_delete(txn)
             manifests = self._write_manifests_parallel(
                 bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
             )
@@ -827,7 +835,7 @@ class IcebergDatasink(
                 manifests,
                 self._commit_snapshot_id,
                 self._snapshot_properties,
-                "main",
+                branch,
                 self._commit_uuid,
             )
             txn.commit_transaction()
@@ -841,6 +849,27 @@ class IcebergDatasink(
                     os.rmdir(self._spill_dir)
                 except OSError:
                     pass
+
+    def _stage_overwrite_delete(self, txn) -> None:
+        from pyiceberg.expressions import AlwaysTrue
+
+        if self._overwrite_filter is not None:
+            from ray.data._internal.datasource.iceberg_datasource import (
+                _IcebergExpressionVisitor,
+            )
+
+            pyi_filter = _IcebergExpressionVisitor().visit(self._overwrite_filter)
+        else:
+            pyi_filter = AlwaysTrue()
+        txn.delete(
+            delete_filter=pyi_filter,
+            case_sensitive=self._case_sensitive,
+            snapshot_properties=self._snapshot_properties,
+            **self._overwrite_kwargs,
+        )
+
+    def _commit_spilled_overwrite(self) -> None:
+        self._commit_spilled(stage_delete=self._stage_overwrite_delete)
 
     def on_write_failed(self, error: Exception) -> None:
         # Best-effort cleanup of spill files and orphan manifests from a failed

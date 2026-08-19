@@ -2345,6 +2345,42 @@ class TestDynamicOverwrite:
         assert str(from_keys) == str(legacy)
 
 
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_dynamic_overwrite_spill_matches_stock(clean_table):
+    from ray.data.context import DataContext
+
+    seed = _create_typed_dataframe(
+        {"col_a": [1, 2, 3], "col_b": ["p1", "p2", "p3"], "col_c": [1, 2, 3]}
+    )
+    new = _create_typed_dataframe(
+        {"col_a": [10, 30], "col_b": ["n1", "n3"], "col_c": [1, 3]}
+    )
+
+    def run():
+        _write_to_iceberg(seed, mode=SaveMode.APPEND)
+        _write_to_iceberg(new, mode=SaveMode.DYNAMIC_OVERWRITE)
+        sql_catalog = pyi_catalog.load_catalog(**_CATALOG_KWARGS)
+        t = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+        return _read_from_iceberg(sort_by="col_a"), t.current_snapshot().summary.operation.value
+
+    sql_catalog, _ = clean_table
+    stock_rows, stock_op = run()
+
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        spill_rows, spill_op = run()
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert rows_same(stock_rows, spill_rows)
+    assert spill_op == "overwrite" == stock_op  # single overwrite snapshot, like stock
+
+
 def test_iceberg_config_commit_spill_defaults():
     from ray.data.context import IcebergConfig
 

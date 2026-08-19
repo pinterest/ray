@@ -871,6 +871,59 @@ class IcebergDatasink(
     def _commit_spilled_overwrite(self) -> None:
         self._commit_spilled(stage_delete=self._stage_overwrite_delete)
 
+    def _commit_spilled_dynamic_overwrite(self) -> None:
+        import time
+
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            apply_overwrite_manifests,
+        )
+
+        t_start = time.perf_counter()
+        bins = self._spiller.close()
+        branch = self._overwrite_kwargs.get("branch", "main")
+        try:
+            positions = self._identity_positions()
+            delete_filter = self._identity_filter_from_keys(
+                self._dynamic_partition_keys, positions
+            )
+            # Existing files in the target partitions (metadata-only; bounded by the
+            # partitions being replaced, not the whole table).
+            deleted_data_files = [
+                task.file
+                for task in self._table.scan(
+                    row_filter=delete_filter, case_sensitive=self._case_sensitive
+                ).plan_files()
+            ]
+
+            self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
+            self._commit_uuid = uuid.uuid4()
+            txn = self._table.transaction()
+            manifests = self._write_manifests_parallel(
+                bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
+            )
+            apply_overwrite_manifests(
+                txn,
+                self._table.io,
+                manifests,
+                deleted_data_files,
+                self._commit_snapshot_id,
+                self._snapshot_properties,
+                branch,
+                self._commit_uuid,
+            )
+            txn.commit_transaction()
+            logger.info(
+                "[spill commit] dynamic overwrite committed in %.2fs",
+                time.perf_counter() - t_start,
+            )
+        finally:
+            self._spiller.cleanup()
+            if self._spill_dir:
+                try:
+                    os.rmdir(self._spill_dir)
+                except OSError:
+                    pass
+
     def on_write_failed(self, error: Exception) -> None:
         # Best-effort cleanup of spill files and orphan manifests from a failed
         # spill commit. Orphan manifests are harmless (unreferenced), but we

@@ -395,6 +395,12 @@ class IcebergDatasink(
 
     _MANIFEST_MAX_FILES_PER_BIN = 100_000
 
+    # Manifest writers are IO-bound and each holds one spill bin in memory, so this
+    # default is memory-bounded, not CPU-derived: os.cpu_count() reports the host's
+    # CPUs (not the cgroup quota) in a container and would over-subscribe the
+    # memory-limited head node. Override via IcebergConfig.commit_manifest_max_concurrency.
+    _DEFAULT_MANIFEST_WRITE_CONCURRENCY = 4
+
     @property
     def collect_write_results_incrementally(self) -> bool:
         return self._data_context.iceberg_config.commit_spill_enabled and self._mode in (
@@ -767,7 +773,7 @@ class IcebergDatasink(
 
         concurrency = self._data_context.iceberg_config.commit_manifest_max_concurrency
         if concurrency <= 0:
-            concurrency = os.cpu_count() or 4
+            concurrency = self._DEFAULT_MANIFEST_WRITE_CONCURRENCY
 
         location = table_metadata.location
         io = self._table.io

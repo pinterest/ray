@@ -263,10 +263,13 @@ class IcebergConfig:
     Args:
         commit_spill_enabled: When True, the Iceberg datasink streams write
             results to a local spill file during collection and writes manifests
-            in parallel head-node-pinned tasks, bounding driver memory during
-            APPEND commits. Defaults to False.
-        commit_manifest_max_concurrency: Max concurrent head-node manifest-writer
-            tasks. 0 derives it from the head node's CPU count. Defaults to 0.
+            in a driver-side thread pool, bounding driver memory during the
+            commit. Defaults to False.
+        commit_manifest_max_concurrency: Max concurrent driver-side manifest
+            writers (a thread pool). 0 uses a small memory-bounded default; it is
+            NOT derived from CPU count, since each writer holds one spill bin and
+            os.cpu_count() misreports host vs cgroup CPUs in a container.
+            Defaults to 0.
         commit_spill_dir: Directory for commit spill files. None uses the system
             temp directory. Defaults to None.
     """

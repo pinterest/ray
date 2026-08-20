@@ -137,23 +137,6 @@ def _commit_upsert_task(
     _append_and_commit(txn, data_files, snapshot_properties)
 
 
-@ray.remote
-def _write_manifests_task(
-    bin_path: str,
-    table_metadata: "TableMetadata",
-    io: "FileIO",
-    snapshot_id: int,
-    output_prefix: str,
-) -> "List[ManifestFile]":
-    from ray.data._internal.datasource.iceberg_manifest_commit import (
-        write_manifests_for_bin,
-    )
-
-    return write_manifests_for_bin(
-        bin_path, table_metadata, io, snapshot_id, output_prefix
-    )
-
-
 @DeveloperAPI
 class IcebergDatasink(
     Datasink[Union[List["DataFile"], tuple[List["DataFile"], Dict[str, List[Any]]]]]
@@ -771,36 +754,36 @@ class IcebergDatasink(
         txn.commit_transaction()
 
     def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid, table_metadata):
-        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+        # Write manifests inline on the driver, NOT via Ray tasks: a dedicated head
+        # node runs with --num-cpus=0, so head-node-pinned tasks are unschedulable.
+        # The driver is not a scheduled task, so it can do this work. A thread pool
+        # gives IO concurrency for the manifest writes while streaming one bin per
+        # worker keeps driver memory bounded.
+        from concurrent.futures import ThreadPoolExecutor
 
-        node_id = ray.get_runtime_context().get_node_id()
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            write_manifests_for_bin,
+        )
+
         concurrency = self._data_context.iceberg_config.commit_manifest_max_concurrency
         if concurrency <= 0:
             concurrency = os.cpu_count() or 4
 
         location = table_metadata.location
-        options = {
-            "num_cpus": 1,
-            "scheduling_strategy": NodeAffinitySchedulingStrategy(
-                node_id, soft=False
-            ),
-        }
+        io = self._table.io
 
-        pending, manifests = [], []
-        for i, bin_path in enumerate(bins):
+        def _write(index_and_bin):
+            i, bin_path = index_and_bin
             prefix = f"{location}/metadata/{commit_uuid}-m{i:06d}"
-            pending.append(
-                _write_manifests_task.options(**options).remote(
-                    bin_path, table_metadata, self._table.io, snapshot_id, prefix
-                )
+            return write_manifests_for_bin(
+                bin_path, table_metadata, io, snapshot_id, prefix
             )
-            if len(pending) >= concurrency:
-                done, pending = ray.wait(pending, num_returns=1, fetch_local=True)
-                manifests.extend(m for r in ray.get(done) for m in r)
-        manifests.extend(m for r in ray.get(pending) for m in r)
 
-        # Populated only after all bins are written; partial failures leave some
-        # manifests untracked (harmless orphans).
+        manifests = []
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
+            for result in executor.map(_write, enumerate(bins)):
+                manifests.extend(result)
+
         self._written_manifest_paths = [m.manifest_path for m in manifests]
         return manifests
 

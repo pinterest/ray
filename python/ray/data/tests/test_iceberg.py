@@ -2315,6 +2315,159 @@ class TestDynamicOverwrite:
         assert rows_same(result, expected)
 
 
+def _concurrent_append_row(col_a: int, col_c: int) -> None:
+    """Simulate a *different* writer committing a new snapshot to the test table.
+
+    Appends a single row (in its own partition) through an independent catalog
+    handle, advancing the table's ``main`` branch so that an in-flight datasink
+    transaction built from an older snapshot loses the optimistic-concurrency
+    race when it commits.
+    """
+    ext_catalog = pyi_catalog.load_catalog(**_CATALOG_KWARGS)
+    ext_table = ext_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    ext_table.append(
+        pa.table(
+            {
+                "col_a": pa.array([col_a], type=pa.int32()),
+                "col_b": pa.array(["ext"], type=pa.string()),
+                "col_c": pa.array([col_c], type=pa.int32()),
+            }
+        )
+    )
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+class TestConcurrentCommitRetry:
+    """Commit paths retry pyiceberg CommitFailedException from concurrent writers.
+
+    Regression for the production failure where a concurrent job advanced the
+    Iceberg table's ``main`` branch between the datasink loading the table and
+    committing, so ``txn.commit_transaction()`` raised
+    ``CommitFailedException: Requirement failed: branch main has changed`` and
+    discarded the entire write.
+    """
+
+    def test_dynamic_overwrite_retries_on_concurrent_commit(
+        self, clean_table, monkeypatch
+    ):
+        """One concurrent commit mid-write is retried: the DYNAMIC_OVERWRITE write
+        still lands, and the concurrent writer's partition survives."""
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        # Seed partitions col_c in {1, 2, 3}.
+        initial = _create_typed_dataframe(
+            {"col_a": [1, 2, 3], "col_b": ["s1", "s2", "s3"], "col_c": [1, 2, 3]}
+        )
+        _write_to_iceberg(initial, mode=SaveMode.APPEND)
+
+        # Inject exactly one concurrent commit (a different partition, col_c=99)
+        # right before the datasink builds+commits, so its transaction -- built
+        # from the snapshot loaded in on_write_complete -- is stale on first try.
+        original = IcebergDatasink._commit_dynamic_overwrite
+        fired = []
+
+        def _inject_then_commit(self, data_files):
+            if not fired:
+                fired.append(True)
+                _concurrent_append_row(col_a=999, col_c=99)
+            return original(self, data_files)
+
+        monkeypatch.setattr(
+            IcebergDatasink, "_commit_dynamic_overwrite", _inject_then_commit
+        )
+
+        # DYNAMIC_OVERWRITE replacing only partition col_c=1.
+        new_data = _create_typed_dataframe(
+            {"col_a": [10], "col_b": ["new1"], "col_c": [1]}
+        )
+        _write_to_iceberg(new_data, mode=SaveMode.DYNAMIC_OVERWRITE)
+
+        assert fired, "concurrent commit was not injected"
+        result = _read_from_iceberg(sort_by="col_a")
+        expected = _create_typed_dataframe(
+            {
+                "col_a": [2, 3, 10, 999],
+                "col_b": ["s2", "s3", "new1", "ext"],
+                "col_c": [2, 3, 1, 99],
+            }
+        )
+        assert rows_same(result, expected)
+
+    def test_append_retries_on_concurrent_commit(self, clean_table, monkeypatch):
+        """The shared retry helper also covers the APPEND commit path."""
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        original = IcebergDatasink._commit_append
+        fired = []
+
+        def _inject_then_commit(self, data_files):
+            if not fired:
+                fired.append(True)
+                _concurrent_append_row(col_a=999, col_c=99)
+            return original(self, data_files)
+
+        monkeypatch.setattr(IcebergDatasink, "_commit_append", _inject_then_commit)
+
+        data = _create_typed_dataframe(
+            {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [1, 2]}
+        )
+        _write_to_iceberg(data, mode=SaveMode.APPEND)
+
+        assert fired, "concurrent commit was not injected"
+        result = _read_from_iceberg(sort_by="col_a")
+        expected = _create_typed_dataframe(
+            {
+                "col_a": [1, 2, 999],
+                "col_b": ["a", "b", "ext"],
+                "col_c": [1, 2, 99],
+            }
+        )
+        assert rows_same(result, expected)
+
+    def test_commit_retry_exhausted_raises(self, clean_table, monkeypatch):
+        """If every attempt loses the race, the CommitFailedException surfaces --
+        bounded retries, no infinite loop, no silently-dropped write."""
+        from pyiceberg.exceptions import CommitFailedException
+
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        # Advance main before the first attempt and again after every reload, so
+        # every rebuilt transaction is immediately stale.
+        counter = {"n": 0}
+        active = {"on": False}
+        original_reload = IcebergDatasink._reload_table
+        original_commit = IcebergDatasink._commit_dynamic_overwrite
+
+        def _reload_then_conflict(self):
+            original_reload(self)
+            if active["on"]:
+                counter["n"] += 1
+                _concurrent_append_row(col_a=900 + counter["n"], col_c=90 + counter["n"])
+
+        def _commit_wrapper(self, data_files):
+            active["on"] = True
+            counter["n"] += 1
+            _concurrent_append_row(col_a=900 + counter["n"], col_c=90 + counter["n"])
+            try:
+                return original_commit(self, data_files)
+            finally:
+                active["on"] = False
+
+        monkeypatch.setattr(IcebergDatasink, "_reload_table", _reload_then_conflict)
+        monkeypatch.setattr(
+            IcebergDatasink, "_commit_dynamic_overwrite", _commit_wrapper
+        )
+
+        new_data = _create_typed_dataframe(
+            {"col_a": [10], "col_b": ["new1"], "col_c": [1]}
+        )
+        with pytest.raises(CommitFailedException):
+            _write_to_iceberg(new_data, mode=SaveMode.DYNAMIC_OVERWRITE)
+
+
 if __name__ == "__main__":
     import sys
 

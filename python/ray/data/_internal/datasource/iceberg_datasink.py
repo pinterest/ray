@@ -877,14 +877,21 @@ class IcebergDatasink(
             )
             # Existing files in the target partitions (metadata-only; bounded by the
             # partitions being replaced, not the whole table).
-            deleted_data_files = [
-                task.file
-                for task in self._table.scan(
-                    row_filter=delete_filter, case_sensitive=self._case_sensitive
-                )
-                .use_ref(branch)
-                .plan_files()
-            ]
+            # A newly created table has no branch ref/snapshot yet: nothing to
+            # delete, and scan().use_ref(branch) would raise "Cannot scan unknown
+            # ref". Only scan an existing branch; apply_overwrite_manifests then uses
+            # an APPEND (not OVERWRITE) snapshot for the empty branch.
+            if branch in self._table.metadata.refs:
+                deleted_data_files = [
+                    task.file
+                    for task in self._table.scan(
+                        row_filter=delete_filter, case_sensitive=self._case_sensitive
+                    )
+                    .use_ref(branch)
+                    .plan_files()
+                ]
+            else:
+                deleted_data_files = []
 
             self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
             self._commit_uuid = uuid.uuid4()

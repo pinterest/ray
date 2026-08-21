@@ -2314,6 +2314,41 @@ class TestDynamicOverwrite:
         )
         assert rows_same(result, expected)
 
+    def test_write_dynamic_overwrite_spill_new_table(self):
+        """DYNAMIC_OVERWRITE spill on a freshly created table (no snapshots) must not
+        raise 'Cannot scan unknown ref' — with nothing to delete, it just adds data."""
+        from ray.data.context import DataContext
+
+        spec = PartitionSpec(
+            PartitionField(
+                source_id=3, field_id=1000, transform=IdentityTransform(), name="col_c"
+            ),
+        )
+        identifier = self._make_table("dyn_new_table_spill", spec)  # fresh, no snapshots
+        data = _create_typed_dataframe(
+            {"col_a": [1, 2], "col_b": ["x", "y"], "col_c": [1, 2]}
+        )
+        ctx = DataContext.get_current()
+        ctx.iceberg_config.commit_spill_enabled = True
+        try:
+            ray.data.from_pandas(data).write_iceberg(
+                table_identifier=identifier,
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+                mode=SaveMode.DYNAMIC_OVERWRITE,
+            )
+        finally:
+            ctx.iceberg_config.commit_spill_enabled = False
+
+        result = (
+            ray.data.read_iceberg(
+                table_identifier=identifier, catalog_kwargs=_CATALOG_KWARGS.copy()
+            )
+            .to_pandas()
+            .sort_values("col_a")
+            .reset_index(drop=True)
+        )
+        assert rows_same(result, data)
+
     @pytest.mark.skipif(
         get_pyarrow_version() < parse_version("14.0.0"),
         reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",

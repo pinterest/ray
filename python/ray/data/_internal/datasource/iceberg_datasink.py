@@ -7,7 +7,7 @@ import os
 import tempfile
 import uuid
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Union
 
 import ray
 from ray.data._internal.execution.interfaces import TaskContext
@@ -29,6 +29,62 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Number of attempts for a driver-side Iceberg metadata commit that can lose an
+# optimistic-concurrency race with a concurrent writer. Matches Iceberg's Java
+# default ``commit.retry.num-retries`` (4).
+_COMMIT_MAX_RETRIES = 4
+_COMMIT_RETRY_INITIAL_BACKOFF_S = 0.2
+_COMMIT_RETRY_MAX_BACKOFF_S = 10.0
+
+
+def _run_commit_with_conflict_retry(
+    build_and_commit: Callable[[], None],
+    reload_table: Callable[[], None],
+    description: str,
+) -> None:
+    """Run an Iceberg commit, retrying optimistic-concurrency conflicts.
+
+    ``build_and_commit`` must build a fresh transaction from the currently loaded
+    table, stage its operations, and call ``commit_transaction()``. When a
+    concurrent writer advances the table between load and commit, pyiceberg
+    raises ``CommitFailedException``; we then ``reload_table()`` and re-invoke
+    ``build_and_commit`` so the transaction is rebuilt against the new snapshot.
+    Data files already written to storage stay valid and are simply re-staged, so
+    a retry does not rewrite data.
+
+    ``CommitStateUnknownException`` is intentionally not retried: the commit may
+    have actually succeeded, so retrying could duplicate data.
+    """
+    import random
+    import time
+
+    from pyiceberg.exceptions import CommitFailedException
+
+    backoff = _COMMIT_RETRY_INITIAL_BACKOFF_S
+    for attempt in range(_COMMIT_MAX_RETRIES):
+        try:
+            build_and_commit()
+            return
+        except CommitFailedException:
+            if attempt >= _COMMIT_MAX_RETRIES - 1:
+                logger.error(
+                    "Failed to commit to Iceberg table (%s) after %d attempts due "
+                    "to concurrent commits.",
+                    description,
+                    _COMMIT_MAX_RETRIES,
+                )
+                raise
+            logger.warning(
+                "Commit conflict on Iceberg table (%s) - another writer committed "
+                "concurrently; reloading and retrying (attempt %d/%d).",
+                description,
+                attempt + 1,
+                _COMMIT_MAX_RETRIES,
+            )
+            reload_table()
+            time.sleep(backoff + random.uniform(0, backoff))
+            backoff = min(backoff * 2, _COMMIT_RETRY_MAX_BACKOFF_S)
 
 
 def _get_arrow_column(
@@ -99,9 +155,10 @@ def _commit_upsert_task(
     from pyiceberg import catalog
     from pyiceberg.table.upsert_util import create_match_filter
 
-    # Load the table
+    # Load the table (through a mutable holder so the conflict-retry can rebuild
+    # the transaction against a freshly reloaded snapshot).
     cat = catalog.load_catalog(catalog_name, **catalog_kwargs)
-    table = cat.load_table(table_identifier)
+    table_holder = {"table": cat.load_table(table_identifier)}
 
     # Merge all join keys dictionaries
     merged_keys_dict = defaultdict(list)
@@ -109,10 +166,8 @@ def _commit_upsert_task(
         for col, values in join_keys_dict.items():
             merged_keys_dict[col].extend(values)
 
-    # Start transaction
-    txn = table.transaction()
-
-    # Create delete filter if we have join keys
+    # Build the copy-on-write delete filter once (a pure function of the keys).
+    delete_filter = None
     if merged_keys_dict:
         # Create PyArrow table from join keys
         keys_table = pa.table(dict(merged_keys_dict))
@@ -127,14 +182,23 @@ def _commit_upsert_task(
         if len(keys_table) > 0:
             # Use PyIceberg's helper to build delete filter
             delete_filter = create_match_filter(keys_table, join_cols)
+
+    def _reload():
+        table_holder["table"] = cat.load_table(table_identifier)
+
+    def _build_and_commit():
+        # Start transaction from the currently loaded snapshot
+        txn = table_holder["table"].transaction()
+        if delete_filter is not None:
             txn.delete(
                 delete_filter=delete_filter,
                 case_sensitive=case_sensitive,
                 snapshot_properties=snapshot_properties,
             )
+        # Append new data files (includes updates and inserts) and commit
+        _append_and_commit(txn, data_files, snapshot_properties)
 
-    # Append new data files (includes updates and inserts) and commit
-    _append_and_commit(txn, data_files, snapshot_properties)
+    _run_commit_with_conflict_retry(_build_and_commit, _reload, "upsert")
 
 
 @DeveloperAPI
@@ -664,40 +728,50 @@ class IcebergDatasink(
 
     def _commit_append(self, data_files: List["DataFile"]) -> None:
         """Commit data files using APPEND mode."""
-        txn = self._table.transaction()
-        _append_and_commit(txn, data_files, self._snapshot_properties)
+
+        def _build_and_commit() -> None:
+            txn = self._table.transaction()
+            _append_and_commit(txn, data_files, self._snapshot_properties)
+
+        _run_commit_with_conflict_retry(_build_and_commit, self._reload_table, "append")
 
     def _commit_overwrite(self, data_files: List["DataFile"]) -> None:
         """Commit data files using OVERWRITE mode."""
-        txn = self._table.transaction()
-        # Delete matching data if filter provided
-        if self._overwrite_filter is not None:
-            from ray.data._internal.datasource.iceberg_datasource import (
-                _IcebergExpressionVisitor,
-            )
 
-            visitor = _IcebergExpressionVisitor()
-            pyi_filter = visitor.visit(self._overwrite_filter)
+        def _build_and_commit() -> None:
+            txn = self._table.transaction()
+            # Delete matching data if filter provided
+            if self._overwrite_filter is not None:
+                from ray.data._internal.datasource.iceberg_datasource import (
+                    _IcebergExpressionVisitor,
+                )
 
-            txn.delete(
-                delete_filter=pyi_filter,
-                case_sensitive=self._case_sensitive,
-                snapshot_properties=self._snapshot_properties,
-                **self._overwrite_kwargs,
-            )
-        else:
-            # Full overwrite - delete all
-            from pyiceberg.expressions import AlwaysTrue
+                visitor = _IcebergExpressionVisitor()
+                pyi_filter = visitor.visit(self._overwrite_filter)
 
-            txn.delete(
-                delete_filter=AlwaysTrue(),
-                case_sensitive=self._case_sensitive,
-                snapshot_properties=self._snapshot_properties,
-                **self._overwrite_kwargs,
-            )
+                txn.delete(
+                    delete_filter=pyi_filter,
+                    case_sensitive=self._case_sensitive,
+                    snapshot_properties=self._snapshot_properties,
+                    **self._overwrite_kwargs,
+                )
+            else:
+                # Full overwrite - delete all
+                from pyiceberg.expressions import AlwaysTrue
 
-        # Append new data files and commit
-        _append_and_commit(txn, data_files, self._snapshot_properties)
+                txn.delete(
+                    delete_filter=AlwaysTrue(),
+                    case_sensitive=self._case_sensitive,
+                    snapshot_properties=self._snapshot_properties,
+                    **self._overwrite_kwargs,
+                )
+
+            # Append new data files and commit
+            _append_and_commit(txn, data_files, self._snapshot_properties)
+
+        _run_commit_with_conflict_retry(
+            _build_and_commit, self._reload_table, "overwrite"
+        )
 
     def _identity_positions(self):
         from pyiceberg.transforms import IdentityTransform
@@ -748,16 +822,22 @@ class IcebergDatasink(
 
     def _commit_dynamic_overwrite(self, data_files: List["DataFile"]) -> None:
         """Commit a dynamic partition overwrite as a single OVERWRITE snapshot."""
-        delete_filter = self._build_identity_partition_filter(data_files)
-        txn = self._table.transaction()
-        txn.replace_partitions(
-            data_files=data_files,
-            delete_filter=delete_filter,
-            case_sensitive=self._case_sensitive,
-            snapshot_properties=self._snapshot_properties,
-            **self._overwrite_kwargs,
+
+        def _build_and_commit() -> None:
+            delete_filter = self._build_identity_partition_filter(data_files)
+            txn = self._table.transaction()
+            txn.replace_partitions(
+                data_files=data_files,
+                delete_filter=delete_filter,
+                case_sensitive=self._case_sensitive,
+                snapshot_properties=self._snapshot_properties,
+                **self._overwrite_kwargs,
+            )
+            txn.commit_transaction()
+
+        _run_commit_with_conflict_retry(
+            _build_and_commit, self._reload_table, "dynamic overwrite"
         )
-        txn.commit_transaction()
 
     def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid, table_metadata):
         # Write manifests inline on the driver, NOT via Ray tasks: a dedicated head

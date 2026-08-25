@@ -3,6 +3,8 @@ Module to write a Ray Dataset into an iceberg table, by using the Ray Datasink A
 """
 import itertools
 import logging
+import os
+import tempfile
 import uuid
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Union
@@ -18,8 +20,10 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from pyiceberg.catalog import Catalog
     from pyiceberg.expressions import BooleanExpression
-    from pyiceberg.manifest import DataFile
+    from pyiceberg.io import FileIO
+    from pyiceberg.manifest import DataFile, ManifestFile
     from pyiceberg.table import Table, Transaction
+    from pyiceberg.table.metadata import TableMetadata
 
     from ray.data.expressions import Expr
 
@@ -263,7 +267,8 @@ class IcebergDatasink(
         # Resolve case_sensitive: per-operation kwargs override DataContext global
         from ray.data import DataContext
 
-        ctx_case_sensitive = DataContext.get_current().iceberg_case_sensitive
+        self._data_context = DataContext.get_current()
+        ctx_case_sensitive = self._data_context.iceberg_case_sensitive
         if self._mode == SaveMode.UPSERT:
             self._case_sensitive = self._upsert_kwargs.pop(
                 "case_sensitive", ctx_case_sensitive
@@ -319,15 +324,47 @@ class IcebergDatasink(
         self._table: "Table" = None
         self._write_uuid: uuid.UUID = None
 
+        # Driver-only state for the incremental spill path (Phase 1: APPEND).
+        self._spiller = None
+        self._spill_dir = None
+        self._running_schema = None
+        self._used_spill_path = False
+        self._num_spilled_data_files = 0
+        self._commit_snapshot_id = None
+        self._commit_uuid = None
+        self._written_manifest_paths = []
+        self._dynamic_partition_keys = set()
+
     def __getstate__(self) -> dict:
-        """Exclude `_table` during pickling."""
+        """Exclude driver-only state during pickling."""
         state = self.__dict__.copy()
-        state.pop("_table", None)
+        for key in (
+            "_table",
+            "_spiller",
+            "_spill_dir",
+            "_running_schema",
+            "_used_spill_path",
+            "_num_spilled_data_files",
+            "_commit_snapshot_id",
+            "_commit_uuid",
+            "_written_manifest_paths",
+            "_dynamic_partition_keys",
+        ):
+            state.pop(key, None)
         return state
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         self._table = None
+        self._spiller = None
+        self._spill_dir = None
+        self._running_schema = None
+        self._used_spill_path = False
+        self._num_spilled_data_files = 0
+        self._commit_snapshot_id = None
+        self._commit_uuid = None
+        self._written_manifest_paths = []
+        self._dynamic_partition_keys = set()
 
     def _get_catalog(self) -> "Catalog":
         from pyiceberg import catalog
@@ -419,6 +456,62 @@ class IcebergDatasink(
                         max_retries,
                     )
                     raise
+
+    _MANIFEST_MAX_FILES_PER_BIN = 100_000
+
+    # Manifest writers are IO-bound and each holds one spill bin in memory, so this
+    # default is memory-bounded, not CPU-derived: os.cpu_count() reports the host's
+    # CPUs (not the cgroup quota) in a container and would over-subscribe the
+    # memory-limited head node. Override via IcebergConfig.commit_manifest_max_concurrency.
+    _DEFAULT_MANIFEST_WRITE_CONCURRENCY = 4
+
+    @property
+    def collect_write_results_incrementally(self) -> bool:
+        return self._data_context.iceberg_config.commit_spill_enabled and self._mode in (
+            SaveMode.APPEND,
+            SaveMode.OVERWRITE,
+            SaveMode.DYNAMIC_OVERWRITE,
+        )
+
+    def _ensure_spiller(self) -> None:
+        if self._spiller is not None:
+            return
+        from pyiceberg.table import TableProperties
+        from pyiceberg.utils.properties import property_as_int
+
+        from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            estimate_manifest_entry_size,
+        )
+
+        target = property_as_int(
+            self._table.metadata.properties,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT,
+        )
+        self._spill_dir = tempfile.mkdtemp(
+            prefix="ray_iceberg_commit_",
+            dir=self._data_context.iceberg_config.commit_spill_dir,
+        )
+        self._spiller = DataFileSpiller(
+            self._spill_dir,
+            target_size_bytes=target,
+            max_files_per_bin=self._MANIFEST_MAX_FILES_PER_BIN,
+            size_of=estimate_manifest_entry_size,
+        )
+
+    def on_write_result(self, write_return: List["DataFile"]) -> None:
+        # 2.52.1 write() returns List[DataFile] for APPEND (not IcebergWriteResult).
+        if not write_return:
+            return
+        self._ensure_spiller()
+        self._spiller.add(write_return)
+        self._num_spilled_data_files += len(write_return)
+        if self._mode == SaveMode.DYNAMIC_OVERWRITE:
+            positions = self._identity_positions()
+            for data_file in write_return:
+                self._dynamic_partition_keys.add(self._identity_key(data_file, positions))
+        self._used_spill_path = True
 
     def on_write_start(self) -> None:
         """Initialize table for writing and create a shared write UUID."""
@@ -566,8 +659,19 @@ class IcebergDatasink(
         Collects all DataFile objects from all workers and performs a single
         atomic commit based on the configured mode.
         """
-        # Reload table to get latest metadata
+        # Reload table to get latest metadata. The spill paths need this too: their
+        # table was loaded in on_write_start, which for a long write can be hours
+        # stale, and they commit metadata derived from it.
         self._reload_table()
+
+        if self.collect_write_results_incrementally and self._used_spill_path:
+            if self._mode == SaveMode.OVERWRITE:
+                self._commit_spilled_overwrite()
+            elif self._mode == SaveMode.DYNAMIC_OVERWRITE:
+                self._commit_spilled_dynamic_overwrite()
+            else:
+                self._commit_spilled()
+            return
 
         # Collect all data files and join keys (if applicable) from all workers
         all_data_files = []
@@ -671,6 +775,39 @@ class IcebergDatasink(
             _build_and_commit, self._reload_table, "overwrite"
         )
 
+    def _identity_positions(self):
+        from pyiceberg.transforms import IdentityTransform
+
+        spec = self._table.metadata.spec()
+        schema = self._table.metadata.schema()
+        return [
+            (pos, schema.find_field(field.source_id).name)
+            for pos, field in enumerate(spec.fields)
+            if isinstance(field.transform, IdentityTransform)
+        ]
+
+    def _identity_key(self, data_file, positions):
+        return tuple(data_file.partition[pos] for pos, _ in positions)
+
+    def _identity_filter_from_keys(self, keys, positions):
+        from pyiceberg.expressions import (
+            AlwaysFalse, And, EqualTo, IsNull, Or, Reference,
+        )
+
+        expr = AlwaysFalse()
+        for key in keys:
+            match = None
+            for (_, name), value in zip(positions, key):
+                predicate = (
+                    EqualTo(Reference(name), value)
+                    if value is not None
+                    else IsNull(Reference(name))
+                )
+                match = predicate if match is None else And(match, predicate)
+            if match is not None:
+                expr = Or(expr, match)
+        return expr
+
     def _build_identity_partition_filter(
         self, data_files: List["DataFile"]
     ) -> "BooleanExpression":
@@ -681,46 +818,9 @@ class IcebergDatasink(
         OR-ed together. Non-identity partition fields (bucket/truncate/etc.) are
         ignored -- deleting the identity partition sweeps all of its buckets.
         """
-        from pyiceberg.expressions import (
-            AlwaysFalse,
-            And,
-            EqualTo,
-            IsNull,
-            Or,
-            Reference,
-        )
-        from pyiceberg.transforms import IdentityTransform
-
-        spec = self._table.metadata.spec()
-        schema = self._table.metadata.schema()
-
-        # (position in the partition record, source column name) for identity fields
-        identity_positions = [
-            (pos, schema.find_field(field.source_id).name)
-            for pos, field in enumerate(spec.fields)
-            if isinstance(field.transform, IdentityTransform)
-        ]
-
-        expr: "BooleanExpression" = AlwaysFalse()
-        seen = set()
-        for data_file in data_files:
-            # Distinct identity-partition value tuple for this file
-            key = tuple(data_file.partition[pos] for pos, _ in identity_positions)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            match = None
-            for (_, name), value in zip(identity_positions, key):
-                predicate = (
-                    EqualTo(Reference(name), value)
-                    if value is not None
-                    else IsNull(Reference(name))
-                )
-                match = predicate if match is None else And(match, predicate)
-            if match is not None:
-                expr = Or(expr, match)
-        return expr
+        positions = self._identity_positions()
+        keys = {self._identity_key(f, positions) for f in data_files}
+        return self._identity_filter_from_keys(keys, positions)
 
     def _commit_dynamic_overwrite(self, data_files: List["DataFile"]) -> None:
         """Commit a dynamic partition overwrite as a single OVERWRITE snapshot."""
@@ -740,3 +840,243 @@ class IcebergDatasink(
         _run_commit_with_conflict_retry(
             _build_and_commit, self._reload_table, "dynamic overwrite"
         )
+
+    def _write_manifests_parallel(self, bins, snapshot_id, commit_uuid, table_metadata):
+        # Write manifests inline on the driver, NOT via Ray tasks: a dedicated head
+        # node runs with --num-cpus=0, so head-node-pinned tasks are unschedulable.
+        # The driver is not a scheduled task, so it can do this work. A thread pool
+        # gives IO concurrency for the manifest writes while streaming one bin per
+        # worker keeps driver memory bounded.
+        from concurrent.futures import ThreadPoolExecutor
+
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            merge_summary_collectors,
+            write_manifests_for_bin,
+        )
+
+        concurrency = self._data_context.iceberg_config.commit_manifest_max_concurrency
+        if concurrency <= 0:
+            concurrency = self._DEFAULT_MANIFEST_WRITE_CONCURRENCY
+
+        location = table_metadata.location
+        io = self._table.io
+
+        def _write(index_and_bin):
+            i, bin_path = index_and_bin
+            prefix = f"{location}/metadata/{commit_uuid}-m{i:06d}"
+            return write_manifests_for_bin(
+                bin_path, table_metadata, io, snapshot_id, prefix
+            )
+
+        manifests = []
+        collectors = []
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
+            for bin_manifests, bin_summary in executor.map(_write, enumerate(bins)):
+                manifests.extend(bin_manifests)
+                collectors.append(bin_summary)
+
+        self._written_manifest_paths = [m.manifest_path for m in manifests]
+        summary = merge_summary_collectors(collectors, table_metadata)
+        return manifests, summary
+
+    def _delete_written_manifests(self) -> None:
+        """Best-effort delete of the manifests written by the last commit attempt.
+
+        Only safe to call when no snapshot references them. Never raises.
+        """
+        io = getattr(self._table, "io", None) if self._table is not None else None
+        if io is not None:
+            for path in self._written_manifest_paths:
+                try:
+                    io.delete(path)
+                except Exception:
+                    logger.debug(
+                        "[spill commit] orphan manifest delete failed: %s", path
+                    )
+        self._written_manifest_paths = []
+
+    def _reload_for_commit_retry(self) -> None:
+        """Reload hook for the spill-commit retry.
+
+        The failed attempt's manifests are referenced by no snapshot, and the next
+        attempt writes a fresh set under a new commit UUID, so drop them now instead
+        of leaking one full set of manifests per lost race.
+        """
+        self._delete_written_manifests()
+        self._reload_table()
+
+    def _commit_spilled(
+        self, stage_delete=None, description: str = "spill append"
+    ) -> None:
+        import time
+
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            apply_appended_manifests,
+        )
+
+        t_start = time.perf_counter()
+        # Closed once, outside the retry: the spill files stay on disk and are
+        # re-read by each attempt, so a retry re-writes manifests but never data.
+        bins = self._spiller.close()
+        logger.info(
+            "[spill commit] %d data files across %d bin(s)",
+            self._num_spilled_data_files,
+            len(bins),
+        )
+        branch = self._overwrite_kwargs.get("branch", "main")
+
+        def _build_and_commit() -> None:
+            # Snapshot id and commit UUID are per-attempt: the id must descend from
+            # the currently loaded snapshot, and a fresh UUID keeps this attempt's
+            # manifest paths distinct from the discarded ones.
+            self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
+            self._commit_uuid = uuid.uuid4()
+            txn = self._table.transaction()
+            if stage_delete is not None:
+                stage_delete(txn)
+            manifests, summary = self._write_manifests_parallel(
+                bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
+            )
+            apply_appended_manifests(
+                txn,
+                self._table.io,
+                self._table.metadata.properties,
+                manifests,
+                self._commit_snapshot_id,
+                self._snapshot_properties,
+                branch,
+                self._commit_uuid,
+                summary,
+            )
+            txn.commit_transaction()
+
+        try:
+            _run_commit_with_conflict_retry(
+                _build_and_commit, self._reload_for_commit_retry, description
+            )
+            logger.info(
+                "[spill commit] committed in %.2fs", time.perf_counter() - t_start
+            )
+        finally:
+            self._spiller.cleanup()
+            if self._spill_dir:
+                try:
+                    os.rmdir(self._spill_dir)
+                except OSError:
+                    pass
+
+    def _stage_overwrite_delete(self, txn) -> None:
+        from pyiceberg.expressions import AlwaysTrue
+
+        if self._overwrite_filter is not None:
+            from ray.data._internal.datasource.iceberg_datasource import (
+                _IcebergExpressionVisitor,
+            )
+
+            pyi_filter = _IcebergExpressionVisitor().visit(self._overwrite_filter)
+        else:
+            pyi_filter = AlwaysTrue()
+        txn.delete(
+            delete_filter=pyi_filter,
+            case_sensitive=self._case_sensitive,
+            snapshot_properties=self._snapshot_properties,
+            **self._overwrite_kwargs,
+        )
+
+    def _commit_spilled_overwrite(self) -> None:
+        self._commit_spilled(
+            stage_delete=self._stage_overwrite_delete, description="spill overwrite"
+        )
+
+    def _commit_spilled_dynamic_overwrite(self) -> None:
+        import time
+
+        from ray.data._internal.datasource.iceberg_manifest_commit import (
+            apply_overwrite_manifests,
+        )
+
+        t_start = time.perf_counter()
+        # Closed once, outside the retry (see _commit_spilled).
+        bins = self._spiller.close()
+        branch = self._overwrite_kwargs.get("branch", "main")
+
+        def _build_and_commit() -> None:
+            # The delete side is re-planned on every attempt: a writer that won the
+            # race may have added files to (or evolved the spec of) the partitions
+            # being replaced, and DataFiles planned against the old snapshot would
+            # both miss those files and re-delete ones already gone.
+            positions = self._identity_positions()
+            delete_filter = self._identity_filter_from_keys(
+                self._dynamic_partition_keys, positions
+            )
+            # Existing files in the target partitions (metadata-only; bounded by the
+            # partitions being replaced, not the whole table).
+            # A newly created table has no branch ref/snapshot yet: nothing to
+            # delete, and scan().use_ref(branch) would raise "Cannot scan unknown
+            # ref". Only scan an existing branch; apply_overwrite_manifests then uses
+            # an APPEND (not OVERWRITE) snapshot for the empty branch.
+            if branch in self._table.metadata.refs:
+                deleted_data_files = [
+                    task.file
+                    for task in self._table.scan(
+                        row_filter=delete_filter, case_sensitive=self._case_sensitive
+                    )
+                    .use_ref(branch)
+                    .plan_files()
+                ]
+            else:
+                deleted_data_files = []
+
+            self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
+            self._commit_uuid = uuid.uuid4()
+            txn = self._table.transaction()
+            manifests, summary = self._write_manifests_parallel(
+                bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
+            )
+            apply_overwrite_manifests(
+                txn,
+                self._table.io,
+                manifests,
+                deleted_data_files,
+                self._commit_snapshot_id,
+                self._snapshot_properties,
+                branch,
+                self._commit_uuid,
+                summary,
+                delete_filter,
+            )
+            txn.commit_transaction()
+
+        try:
+            _run_commit_with_conflict_retry(
+                _build_and_commit,
+                self._reload_for_commit_retry,
+                "spill dynamic overwrite",
+            )
+            logger.info(
+                "[spill commit] dynamic overwrite committed in %.2fs",
+                time.perf_counter() - t_start,
+            )
+        finally:
+            self._spiller.cleanup()
+            if self._spill_dir:
+                try:
+                    os.rmdir(self._spill_dir)
+                except OSError:
+                    pass
+
+    def on_write_failed(self, error: Exception) -> None:
+        # Best-effort cleanup of spill files and orphan manifests from a failed
+        # spill commit. Orphan manifests are harmless (unreferenced), but we
+        # remove what we can. Never raise from cleanup.
+        if self._spiller is not None:
+            try:
+                self._spiller.cleanup()
+            except Exception:
+                logger.debug("[spill commit] spiller cleanup failed", exc_info=True)
+        self._delete_written_manifests()
+        if self._spill_dir:
+            try:
+                os.rmdir(self._spill_dir)
+            except OSError:
+                pass

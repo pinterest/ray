@@ -5215,14 +5215,30 @@ class Dataset:
             self._write_ds = Dataset(plan, logical_plan).materialize()
 
             iter_, stats = self._write_ds._execute_to_iterator()
+            incremental = datasink.collect_write_results_incrementally
             write_results = []
+            total_num_rows = 0
+            total_size_bytes = 0
 
             for bundle in iter_:
                 res = ray.get(bundle.block_refs)
-                # Generate write result report
-                write_results.append(_gen_datasink_write_result(res))
+                write_result = _gen_datasink_write_result(res)
+                if incremental:
+                    total_num_rows += write_result.num_rows
+                    total_size_bytes += write_result.size_bytes
+                    for write_return in write_result.write_returns:
+                        datasink.on_write_result(write_return)
+                else:
+                    write_results.append(write_result)
 
-            combined_write_result = WriteResult.combine(*write_results)
+            if incremental:
+                combined_write_result = WriteResult(
+                    num_rows=total_num_rows,
+                    size_bytes=total_size_bytes,
+                    write_returns=[],
+                )
+            else:
+                combined_write_result = WriteResult.combine(*write_results)
 
             logger.info(
                 "Data sink %s finished. %d rows and %s data written.",

@@ -2314,6 +2314,734 @@ class TestDynamicOverwrite:
         )
         assert rows_same(result, expected)
 
+    def test_write_dynamic_overwrite_spill_new_table(self):
+        """DYNAMIC_OVERWRITE spill on a freshly created table (no snapshots) must not
+        raise 'Cannot scan unknown ref' — with nothing to delete, it just adds data."""
+        from ray.data.context import DataContext
+
+        spec = PartitionSpec(
+            PartitionField(
+                source_id=3, field_id=1000, transform=IdentityTransform(), name="col_c"
+            ),
+        )
+        identifier = self._make_table("dyn_new_table_spill", spec)  # fresh, no snapshots
+        data = _create_typed_dataframe(
+            {"col_a": [1, 2], "col_b": ["x", "y"], "col_c": [1, 2]}
+        )
+        ctx = DataContext.get_current()
+        ctx.iceberg_config.commit_spill_enabled = True
+        try:
+            ray.data.from_pandas(data).write_iceberg(
+                table_identifier=identifier,
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+                mode=SaveMode.DYNAMIC_OVERWRITE,
+            )
+        finally:
+            ctx.iceberg_config.commit_spill_enabled = False
+
+        result = (
+            ray.data.read_iceberg(
+                table_identifier=identifier, catalog_kwargs=_CATALOG_KWARGS.copy()
+            )
+            .to_pandas()
+            .sort_values("col_a")
+            .reset_index(drop=True)
+        )
+        assert rows_same(result, data)
+
+    @pytest.mark.skipif(
+        get_pyarrow_version() < parse_version("14.0.0"),
+        reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+    )
+    def test_identity_filter_helpers_match_legacy(self, clean_table):
+        from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+        from ray.data._internal.savemode import SaveMode
+
+        sql_catalog, _ = clean_table
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.DYNAMIC_OVERWRITE,
+        )
+        sink._table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+
+        df = create_pa_table()  # partitioned by col_c (identity)
+        dfs = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=df, io=sink._table.io
+            )
+        )
+        positions = sink._identity_positions()
+        keys = {sink._identity_key(f, positions) for f in dfs}
+        from_keys = sink._identity_filter_from_keys(keys, positions)
+        legacy = sink._build_identity_partition_filter(dfs)
+        assert str(from_keys) == str(legacy)
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_dynamic_overwrite_spill_matches_stock(clean_table):
+    from ray.data.context import DataContext
+
+    seed = _create_typed_dataframe(
+        {"col_a": [1, 2, 3], "col_b": ["p1", "p2", "p3"], "col_c": [1, 2, 3]}
+    )
+    new = _create_typed_dataframe(
+        {"col_a": [10, 30], "col_b": ["n1", "n3"], "col_c": [1, 3]}
+    )
+
+    def run():
+        _write_to_iceberg(seed, mode=SaveMode.APPEND)
+        _write_to_iceberg(new, mode=SaveMode.DYNAMIC_OVERWRITE)
+        sql_catalog = pyi_catalog.load_catalog(**_CATALOG_KWARGS)
+        t = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+        return _read_from_iceberg(sort_by="col_a"), t.current_snapshot().summary
+
+    sql_catalog, _ = clean_table
+    stock_rows, stock_summary = run()
+
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        spill_rows, spill_summary = run()
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert rows_same(stock_rows, spill_rows)
+    # Single overwrite snapshot like stock, with matching summary stats: the
+    # injected-manifest path has to account for both the added and deleted sides.
+    assert spill_summary.operation.value == "overwrite"
+    assert spill_summary.model_dump() == stock_summary.model_dump()
+
+
+def test_iceberg_config_commit_spill_defaults():
+    from ray.data.context import IcebergConfig
+
+    cfg = IcebergConfig()
+    assert cfg.commit_spill_enabled is False
+    assert cfg.commit_manifest_max_concurrency == 0
+    assert cfg.commit_spill_dir is None
+
+    cfg2 = IcebergConfig(commit_spill_enabled=True, commit_manifest_max_concurrency=4)
+    assert cfg2.commit_spill_enabled is True
+    assert cfg2.commit_manifest_max_concurrency == 4
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_manifests_for_bin_roundtrip(clean_table, tmp_path):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+    from pyiceberg.manifest import ManifestEntryStatus
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, table = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    meta = table.metadata
+    data_files = list(
+        _dataframe_to_data_files(
+            table_metadata=meta, df=create_pa_table(), io=table.io
+        )
+    )
+    assert len(data_files) > 0
+
+    spiller = DataFileSpiller(
+        str(tmp_path),
+        target_size_bytes=10**9,
+        max_files_per_bin=10**9,
+        size_of=estimate_manifest_entry_size,
+    )
+    spiller.add(data_files)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    manifests, _summary = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/m0"
+    )
+    assert len(manifests) >= 1
+
+    total_added = sum(m.added_files_count for m in manifests)
+    assert total_added == len(data_files)
+    entries = [e for m in manifests for e in m.fetch_manifest_entry(table.io)]
+    assert all(e.snapshot_id == snapshot_id for e in entries)
+    assert all(e.status == ManifestEntryStatus.ADDED for e in entries)
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_apply_appended_manifests_matches_stock_append(clean_table, tmp_path):
+    import uuid
+
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        apply_appended_manifests,
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, _ = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    payload = create_pa_table()
+    meta = table.metadata
+
+    data_files = list(
+        _dataframe_to_data_files(table_metadata=meta, df=payload, io=table.io)
+    )
+    spiller = DataFileSpiller(
+        str(tmp_path), 10**9, 10**9, estimate_manifest_entry_size
+    )
+    spiller.add(data_files)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    commit_uuid = uuid.uuid4()
+    manifests, summary = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/{commit_uuid}-m0"
+    )
+
+    txn = table.transaction()
+    apply_appended_manifests(
+        txn,
+        table.io,
+        meta.properties,
+        manifests,
+        snapshot_id,
+        snapshot_properties={},
+        branch="main",
+        commit_uuid=commit_uuid,
+        summary_collector=summary,
+    )
+    txn.commit_transaction()
+
+    injected = (
+        sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+        .scan()
+        .to_pandas()
+        .sort_values(["col_a", "col_b", "col_c"])
+        .reset_index(drop=True)
+    )
+    current = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    assert current.current_snapshot().snapshot_id == snapshot_id
+    assert len(injected) == payload.num_rows
+    assert injected["col_a"].tolist() == sorted(payload.column("col_a").to_pylist())
+
+
+def _fresh_partitioned_table(sql_catalog, name: str, properties=None) -> Table:
+    """Create (replacing any existing) an empty table partitioned by identity(col_c)."""
+    identifier = f"{_DB_NAME}.{name}"
+    if (_DB_NAME, name) in sql_catalog.list_tables(_DB_NAME):
+        sql_catalog.drop_table(identifier)
+    schema = pyi_schema.Schema(
+        pyi_types.NestedField(1, "col_a", pyi_types.IntegerType(), required=False),
+        pyi_types.NestedField(2, "col_b", pyi_types.StringType(), required=False),
+        pyi_types.NestedField(3, "col_c", pyi_types.IntegerType(), required=False),
+    )
+    spec = PartitionSpec(
+        PartitionField(
+            source_id=3, field_id=1000, transform=IdentityTransform(), name="col_c"
+        )
+    )
+    return sql_catalog.create_table(
+        identifier,
+        schema=schema,
+        partition_spec=spec,
+        properties=properties or {},
+    )
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_apply_appended_manifests_summary_matches_stock(tmp_path):
+    """The injected APPEND snapshot summary must match stock's, not just row parity.
+
+    The injection path never populates the producer's ``_added_data_files`` (which
+    stock ``_summary`` derives added-records / added-data-files / added-files-size
+    from and rolls into total-records). This commits the same data files two ways --
+    stock ``append`` and the spill/inject path -- to two fresh, identical partitioned
+    tables and asserts the resulting ``snapshot.summary`` dicts are equal.
+    """
+    import uuid
+
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        apply_appended_manifests,
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog = pyi_catalog.load_catalog(**_CATALOG_KWARGS)
+
+    # One payload, committed both ways so the added-side stats are identical.
+    payload = create_pa_table()
+
+    stock_table = _fresh_partitioned_table(sql_catalog, "summary_stock")
+    stock_table.append(payload)
+    stock_summary = (
+        sql_catalog.load_table(f"{_DB_NAME}.summary_stock").current_snapshot().summary
+    )
+
+    inject_table = _fresh_partitioned_table(sql_catalog, "summary_inject")
+    data_files = list(
+        _dataframe_to_data_files(
+            table_metadata=inject_table.metadata, df=payload, io=inject_table.io
+        )
+    )
+    spiller = DataFileSpiller(
+        str(tmp_path), 10**9, 10**9, estimate_manifest_entry_size
+    )
+    spiller.add(data_files)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = inject_table.metadata.new_snapshot_id()
+    commit_uuid = uuid.uuid4()
+    manifests, summary = write_manifests_for_bin(
+        bin_path,
+        inject_table.metadata,
+        inject_table.io,
+        snapshot_id,
+        f"file://{tmp_path}/{commit_uuid}-m0",
+    )
+    txn = inject_table.transaction()
+    apply_appended_manifests(
+        txn,
+        inject_table.io,
+        inject_table.metadata.properties,
+        manifests,
+        snapshot_id,
+        snapshot_properties={},
+        branch="main",
+        commit_uuid=commit_uuid,
+        summary_collector=summary,
+    )
+    txn.commit_transaction()
+    inject_summary = (
+        sql_catalog.load_table(f"{_DB_NAME}.summary_inject").current_snapshot().summary
+    )
+
+    assert inject_summary.model_dump() == stock_summary.model_dump()
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_append_spill_summary_matches_stock(monkeypatch):
+    """Snapshot-summary parity end to end: the same payload written with the spill
+    flag off and on must produce identical ``snapshot.summary`` dicts.
+
+    Goes through ``write_iceberg`` rather than the commit internals, and forces one
+    spill bin per data file so the per-bin summary collectors actually have to be
+    merged. ``write.summary.partition-limit`` is raised above the number of ``col_c``
+    values on both tables so the compared summaries carry per-partition entries,
+    which is where a bad merge would surface.
+    """
+    from pyiceberg.table import TableProperties
+
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data.context import DataContext
+
+    sql_catalog = pyi_catalog.load_catalog(**_CATALOG_KWARGS)
+    payload = create_pa_table()
+    partition_summaries = {TableProperties.WRITE_PARTITION_SUMMARY_LIMIT: "20"}
+
+    _fresh_partitioned_table(sql_catalog, "summary_e2e_stock", partition_summaries)
+    _fresh_partitioned_table(
+        sql_catalog,
+        "summary_e2e_spill",
+        {**partition_summaries, TableProperties.MANIFEST_TARGET_SIZE_BYTES: "1"},
+    )
+
+    bin_counts = []
+    original = IcebergDatasink._write_manifests_parallel
+
+    def _count_bins(self, bins, *args, **kwargs):
+        bin_counts.append(len(bins))
+        return original(self, bins, *args, **kwargs)
+
+    monkeypatch.setattr(IcebergDatasink, "_write_manifests_parallel", _count_bins)
+
+    def _write_and_get_summary(name):
+        ray.data.from_arrow(payload).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{name}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+        return sql_catalog.load_table(f"{_DB_NAME}.{name}").current_snapshot().summary
+
+    stock_summary = _write_and_get_summary("summary_e2e_stock")
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        spill_summary = _write_and_get_summary("summary_e2e_spill")
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert bin_counts, "spill path did not run: no manifests were written on the driver"
+    assert bin_counts[0] > 1, f"expected several spill bins, got {bin_counts[0]}"
+    assert spill_summary.model_dump() == stock_summary.model_dump()
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_datasink_on_write_result_spills(clean_table):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data._internal.savemode import SaveMode
+    from ray.data.context import DataContext
+
+    DataContext.get_current().iceberg_config.commit_spill_enabled = True
+    try:
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.APPEND,
+        )
+        assert sink.collect_write_results_incrementally is True
+        sink.on_write_start()
+
+        pa_table = create_pa_table()
+        data_files = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=pa_table, io=sink._table.io
+            )
+        )
+        sink.on_write_result(data_files)
+        sink.on_write_result(data_files)
+
+        assert sink._used_spill_path is True
+        assert sink._num_spilled_data_files == 2 * len(data_files)
+        bins = sink._spiller.close()
+        assert len(bins) >= 1
+        sink._spiller.cleanup()
+    finally:
+        DataContext.get_current().iceberg_config.commit_spill_enabled = False
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_append_spill_matches_stock(clean_table):
+    from ray.data.context import DataContext
+
+    payload = create_pa_table()
+
+    # Flag OFF: stock path.
+    ray.data.from_arrow(payload).repartition(4).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+        catalog_kwargs=_CATALOG_KWARGS.copy(),
+    )
+    stock = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+
+    # Reset table, then flag ON: spill path.
+    sql_catalog, table = clean_table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(payload).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    spilled = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+    assert rows_same(stock, spilled)
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+@pytest.mark.parametrize("overwrite_filter", [None, col("col_c") >= 5])
+def test_write_overwrite_spill_matches_stock(clean_table, overwrite_filter):
+    from ray.data.context import DataContext
+
+    seed = create_pa_table()
+    payload = pa.Table.from_pydict(
+        {"col_a": list(range(50)), "col_b": ["z"] * 50, "col_c": [5] * 50},
+        schema=_SCHEMA,
+    )
+    kwargs = {} if overwrite_filter is None else {"overwrite_filter": overwrite_filter}
+
+    # Stock (flag off)
+    ray.data.from_arrow(seed).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy()
+    )
+    ray.data.from_arrow(payload).repartition(4).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy(),
+        mode=SaveMode.OVERWRITE, **kwargs,
+    )
+    stock = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+
+    sql_catalog, _ = clean_table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(seed).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy()
+        )
+        ray.data.from_arrow(payload).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}", catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.OVERWRITE, **kwargs,
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+    spilled = _read_from_iceberg(sort_by=["col_a", "col_b", "col_c"])
+    assert rows_same(stock, spilled)
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_write_append_spill_schema_evolution_matches_stock(clean_table):
+    """Test spill path matches stock when schema evolves across blocks."""
+    from ray.data.context import DataContext
+
+    sql_catalog, table = clean_table
+
+    # Create heterogeneous Arrow tables: second is wider (has col_d)
+    tbl_first = pa.Table.from_pydict(
+        {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [10, 20]},
+        schema=pa.schema([
+            pa.field("col_a", pa.int32()),
+            pa.field("col_b", pa.string()),
+            pa.field("col_c", pa.int32()),
+        ]),
+    )
+    tbl_wider = pa.Table.from_pydict(
+        {"col_a": [3, 4], "col_b": ["c", "d"], "col_c": [30, 40], "col_d": ["x", "y"]},
+        schema=pa.schema([
+            pa.field("col_a", pa.int32()),
+            pa.field("col_b", pa.string()),
+            pa.field("col_c", pa.int32()),
+            pa.field("col_d", pa.string()),
+        ]),
+    )
+
+    # Flag OFF: stock path with heterogeneous schemas
+    ray.data.from_arrow([tbl_first, tbl_wider]).write_iceberg(
+        table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+        catalog_kwargs=_CATALOG_KWARGS.copy(),
+    )
+    stock_rows = _read_from_iceberg(sort_by="col_a")
+    stock_schema_fields = set(stock_rows.columns)
+
+    # Reset table
+    sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}").delete()
+
+    # Flag ON: spill path with same heterogeneous schemas
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow([tbl_first, tbl_wider]).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    spilled_rows = _read_from_iceberg(sort_by="col_a")
+    spilled_schema_fields = set(spilled_rows.columns)
+
+    assert rows_same(stock_rows, spilled_rows)
+    assert stock_schema_fields == spilled_schema_fields
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_spill_path_does_not_accumulate_write_returns(clean_table, monkeypatch):
+    from ray.data._internal.datasource import iceberg_datasink as ids
+    from ray.data.context import DataContext
+
+    seen = {}
+    original = ids.IcebergDatasink.on_write_complete
+
+    def spy(self, write_result):
+        seen["write_returns"] = list(write_result.write_returns)
+        seen["num_rows"] = write_result.num_rows
+        return original(self, write_result)
+
+    monkeypatch.setattr(ids.IcebergDatasink, "on_write_complete", spy)
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        ray.data.from_arrow(create_pa_table()).repartition(4).write_iceberg(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+        )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert seen["write_returns"] == []  # driver did not accumulate data files
+    assert seen["num_rows"] == create_pa_table().num_rows
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_spill_commit_failure_cleans_spill_dir(clean_table, monkeypatch):
+    from ray.data._internal.datasource import iceberg_datasink as ids
+    from ray.data.context import DataContext
+
+    captured = {}
+    original_commit = ids.IcebergDatasink._commit_spilled
+
+    def boom(self, stage_delete=None):
+        captured["spill_dir"] = None
+
+        def fail(*a, **k):
+            captured["spill_dir"] = self._spill_dir
+            raise RuntimeError("injected commit failure")
+
+        monkeypatch.setattr(self, "_write_manifests_parallel", fail)
+        return original_commit(self, stage_delete=stage_delete)
+
+    monkeypatch.setattr(ids.IcebergDatasink, "_commit_spilled", boom)
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        with pytest.raises(RuntimeError, match="injected commit failure"):
+            ray.data.from_arrow(create_pa_table()).repartition(2).write_iceberg(
+                table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+            )
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
+
+    assert captured["spill_dir"] is not None
+    assert not os.path.exists(captured["spill_dir"])  # spill cleaned in finally
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_apply_overwrite_manifests_single_overwrite_snapshot(clean_table, tmp_path):
+    import uuid
+
+    from pyiceberg.expressions import AlwaysTrue
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_commit_spill import DataFileSpiller
+    from ray.data._internal.datasource.iceberg_manifest_commit import (
+        apply_overwrite_manifests,
+        estimate_manifest_entry_size,
+        write_manifests_for_bin,
+    )
+
+    sql_catalog, _ = clean_table
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    # Seed existing data so the branch has a snapshot (=> OVERWRITE, not APPEND).
+    table.append(create_pa_table())
+    table = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    snaps_before = len(table.snapshots())
+
+    # Existing files to delete = everything (full overwrite).
+    existing = [t.file for t in table.scan(row_filter=AlwaysTrue()).plan_files()]
+    assert existing
+
+    payload = create_pa_table()
+    meta = table.metadata
+    dfs = list(_dataframe_to_data_files(table_metadata=meta, df=payload, io=table.io))
+    spiller = DataFileSpiller(str(tmp_path), 10**9, 10**9, estimate_manifest_entry_size)
+    spiller.add(dfs)
+    (bin_path,) = spiller.close()
+
+    snapshot_id = meta.new_snapshot_id()
+    commit_uuid = uuid.uuid4()
+    manifests, summary = write_manifests_for_bin(
+        bin_path, meta, table.io, snapshot_id, f"file://{tmp_path}/{commit_uuid}-m0"
+    )
+
+    txn = table.transaction()
+    apply_overwrite_manifests(
+        txn, table.io, manifests, existing, snapshot_id,
+        snapshot_properties={}, branch="main", commit_uuid=commit_uuid,
+        summary_collector=summary,
+    )
+    txn.commit_transaction()
+
+    reloaded = sql_catalog.load_table(f"{_DB_NAME}.{_TABLE_NAME}")
+    assert reloaded.current_snapshot().snapshot_id == snapshot_id
+    assert reloaded.current_snapshot().summary.operation.value == "overwrite"
+    assert len(reloaded.snapshots()) == snaps_before + 1
+    rows = reloaded.scan().to_pandas()
+    assert len(rows) == payload.num_rows  # replaced, not appended
+
+
+@pytest.mark.skipif(
+    get_pyarrow_version() < parse_version("14.0.0"),
+    reason="PyIceberg 0.7.0 fails on pyarrow <= 14.0.0",
+)
+def test_gate_and_dynamic_key_accumulation(clean_table):
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+    from ray.data._internal.savemode import SaveMode
+    from ray.data.context import DataContext
+
+    DataContext.get_current().iceberg_config.commit_spill_enabled = True
+    try:
+        for mode in (SaveMode.APPEND, SaveMode.OVERWRITE, SaveMode.DYNAMIC_OVERWRITE):
+            sink = IcebergDatasink(
+                table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+                catalog_kwargs=_CATALOG_KWARGS.copy(),
+                mode=mode,
+            )
+            assert sink.collect_write_results_incrementally is True
+
+        sink = IcebergDatasink(
+            table_identifier=f"{_DB_NAME}.{_TABLE_NAME}",
+            catalog_kwargs=_CATALOG_KWARGS.copy(),
+            mode=SaveMode.DYNAMIC_OVERWRITE,
+        )
+        sink.on_write_start()
+        df = create_pa_table()  # col_c in 0..9
+        dfs = list(
+            _dataframe_to_data_files(
+                table_metadata=sink._table.metadata, df=df, io=sink._table.io
+            )
+        )
+        sink.on_write_result(dfs)
+        positions = sink._identity_positions()
+        assert sink._dynamic_partition_keys == {
+            sink._identity_key(f, positions) for f in dfs
+        }
+    finally:
+        DataContext.get_current().iceberg_config.commit_spill_enabled = False
+
 
 def _concurrent_append_row(col_a: int, col_c: int) -> None:
     """Simulate a *different* writer committing a new snapshot to the test table.
@@ -2334,6 +3062,19 @@ def _concurrent_append_row(col_a: int, col_c: int) -> None:
             }
         )
     )
+
+
+@pytest.fixture
+def spill_commit_enabled():
+    """Route writes through the commit-spill path for the duration of a test."""
+    from ray.data.context import DataContext
+
+    ctx = DataContext.get_current()
+    ctx.iceberg_config.commit_spill_enabled = True
+    try:
+        yield ctx
+    finally:
+        ctx.iceberg_config.commit_spill_enabled = False
 
 
 @pytest.mark.skipif(
@@ -2466,6 +3207,144 @@ class TestConcurrentCommitRetry:
         )
         with pytest.raises(CommitFailedException):
             _write_to_iceberg(new_data, mode=SaveMode.DYNAMIC_OVERWRITE)
+
+    def test_spill_append_retries_on_concurrent_commit(
+        self, clean_table, spill_commit_enabled, monkeypatch
+    ):
+        """The spill commit path is retried too.
+
+        It reaches the table through pre-written manifests rather than staged
+        DataFiles, so it needs the same protection: a lost race here discards a
+        write large enough to have spilled in the first place.
+        """
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        original = IcebergDatasink._commit_spilled
+        fired = []
+
+        def _inject_then_commit(self, *args, **kwargs):
+            if not fired:
+                fired.append(True)
+                _concurrent_append_row(col_a=999, col_c=99)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(IcebergDatasink, "_commit_spilled", _inject_then_commit)
+
+        data = _create_typed_dataframe(
+            {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [1, 2]}
+        )
+        _write_to_iceberg(data, mode=SaveMode.APPEND)
+
+        assert fired, "concurrent commit was not injected"
+        result = _read_from_iceberg(sort_by="col_a")
+        expected = _create_typed_dataframe(
+            {
+                "col_a": [1, 2, 999],
+                "col_b": ["a", "b", "ext"],
+                "col_c": [1, 2, 99],
+            }
+        )
+        assert rows_same(result, expected)
+
+    def test_spill_dynamic_overwrite_replans_deletes_on_retry(
+        self, clean_table, spill_commit_enabled, monkeypatch
+    ):
+        """A retried spill DYNAMIC_OVERWRITE must re-plan its delete side.
+
+        The winning writer's rows only survive if they landed outside the partitions
+        being replaced; a row it added *inside* a replaced partition has to be swept
+        by the retry, just as a conflict-free run would have swept it. Planning the
+        deletes once, before the reload, would leave that row behind.
+        """
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        seed = _create_typed_dataframe(
+            {"col_a": [1, 2, 3], "col_b": ["s1", "s2", "s3"], "col_c": [1, 2, 3]}
+        )
+        _write_to_iceberg(seed, mode=SaveMode.APPEND)
+
+        original = IcebergDatasink._commit_spilled_dynamic_overwrite
+        fired = []
+
+        def _inject_then_commit(self):
+            if not fired:
+                fired.append(True)
+                # Outside the replaced partition: survives.
+                _concurrent_append_row(col_a=999, col_c=99)
+                # Inside the replaced partition: swept by the retry's fresh plan.
+                _concurrent_append_row(col_a=888, col_c=1)
+            return original(self)
+
+        monkeypatch.setattr(
+            IcebergDatasink,
+            "_commit_spilled_dynamic_overwrite",
+            _inject_then_commit,
+        )
+
+        new_data = _create_typed_dataframe(
+            {"col_a": [10], "col_b": ["new1"], "col_c": [1]}
+        )
+        _write_to_iceberg(new_data, mode=SaveMode.DYNAMIC_OVERWRITE)
+
+        assert fired, "concurrent commit was not injected"
+        result = _read_from_iceberg(sort_by="col_a")
+        expected = _create_typed_dataframe(
+            {
+                "col_a": [2, 3, 10, 999],
+                "col_b": ["s2", "s3", "new1", "ext"],
+                "col_c": [2, 3, 1, 99],
+            }
+        )
+        assert rows_same(result, expected)
+
+    def test_spill_commit_retry_deletes_orphan_manifests(
+        self, clean_table, spill_commit_enabled, monkeypatch
+    ):
+        """A losing attempt's manifests are deleted rather than leaked.
+
+        Every attempt writes a full set of manifests under its own commit UUID, but
+        only the winning set ends up referenced by a snapshot.
+        """
+        from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
+
+        def _local(path):
+            return path[len("file://") :] if path.startswith("file://") else path
+
+        original_write = IcebergDatasink._write_manifests_parallel
+        original_commit = IcebergDatasink._commit_spilled
+        attempts = []
+        fired = []
+
+        def _record_written(self, *args, **kwargs):
+            result = original_write(self, *args, **kwargs)
+            attempts.append(list(self._written_manifest_paths))
+            return result
+
+        def _inject_then_commit(self, *args, **kwargs):
+            if not fired:
+                fired.append(True)
+                _concurrent_append_row(col_a=999, col_c=99)
+            return original_commit(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            IcebergDatasink, "_write_manifests_parallel", _record_written
+        )
+        monkeypatch.setattr(IcebergDatasink, "_commit_spilled", _inject_then_commit)
+
+        data = _create_typed_dataframe(
+            {"col_a": [1, 2], "col_b": ["a", "b"], "col_c": [1, 2]}
+        )
+        _write_to_iceberg(data, mode=SaveMode.APPEND)
+
+        assert len(attempts) == 2, "expected one losing and one winning attempt"
+        orphaned, committed = attempts
+        assert orphaned and committed
+        # A fresh commit UUID per attempt, so the sets cannot overlap.
+        assert set(orphaned).isdisjoint(committed)
+        for path in orphaned:
+            assert not os.path.exists(_local(path)), f"leaked orphan manifest: {path}"
+        for path in committed:
+            assert os.path.exists(_local(path)), f"committed manifest missing: {path}"
 
 
 if __name__ == "__main__":

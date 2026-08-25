@@ -210,6 +210,13 @@ DEFAULT_S3_TRY_CREATE_DIR = False
 
 DEFAULT_ICEBERG_CASE_SENSITIVE = False
 
+DEFAULT_ICEBERG_COMMIT_SPILL_ENABLED: bool = env_bool(
+    "RAY_DATA_ICEBERG_COMMIT_SPILL_ENABLED", False
+)
+DEFAULT_ICEBERG_COMMIT_MANIFEST_MAX_CONCURRENCY: int = env_integer(
+    "RAY_DATA_ICEBERG_COMMIT_MANIFEST_MAX_CONCURRENCY", 0
+)
+
 DEFAULT_WAIT_FOR_MIN_ACTORS_S = env_integer(
     "RAY_DATA_DEFAULT_WAIT_FOR_MIN_ACTORS_S", -1
 )
@@ -246,6 +253,32 @@ DEFAULT_ACTOR_POOL_UTIL_DOWNSCALING_THRESHOLD: float = env_float(
 DEFAULT_ENABLE_DYNAMIC_OUTPUT_QUEUE_SIZE_BACKPRESSURE: bool = env_bool(
     "RAY_DATA_ENABLE_DYNAMIC_OUTPUT_QUEUE_SIZE_BACKPRESSURE", False
 )
+
+
+@DeveloperAPI
+@dataclass
+class IcebergConfig:
+    """Configuration for Iceberg commit-spill behavior.
+
+    Args:
+        commit_spill_enabled: When True, the Iceberg datasink streams write
+            results to a local spill file during collection and writes manifests
+            in a driver-side thread pool, bounding driver memory during the
+            commit. Defaults to False.
+        commit_manifest_max_concurrency: Max concurrent driver-side manifest
+            writers (a thread pool). 0 uses a small memory-bounded default; it is
+            NOT derived from CPU count, since each writer holds one spill bin and
+            os.cpu_count() misreports host vs cgroup CPUs in a container.
+            Defaults to 0.
+        commit_spill_dir: Directory for commit spill files. None uses the system
+            temp directory. Defaults to None.
+    """
+
+    commit_spill_enabled: bool = DEFAULT_ICEBERG_COMMIT_SPILL_ENABLED
+    commit_manifest_max_concurrency: int = (
+        DEFAULT_ICEBERG_COMMIT_MANIFEST_MAX_CONCURRENCY
+    )
+    commit_spill_dir: Optional[str] = None
 
 
 @DeveloperAPI
@@ -473,6 +506,7 @@ class DataContext:
             overwrites) case-sensitive. Per-operation kwargs (e.g.,
             ``scan_kwargs["case_sensitive"]``, ``upsert_kwargs["case_sensitive"]``)
             take precedence over this setting.
+        iceberg_config: Iceberg commit-spill settings. See :class:`IcebergConfig`.
     """
 
     # `None` means the block size is infinite.
@@ -618,6 +652,7 @@ class DataContext:
     pandas_block_ignore_metadata: bool = DEFAULT_PANDAS_BLOCK_IGNORE_METADATA
 
     iceberg_case_sensitive: bool = DEFAULT_ICEBERG_CASE_SENSITIVE
+    iceberg_config: IcebergConfig = field(default_factory=IcebergConfig)
 
     def __post_init__(self):
         # The additonal ray remote args that should be added to

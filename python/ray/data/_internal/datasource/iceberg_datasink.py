@@ -659,6 +659,11 @@ class IcebergDatasink(
         Collects all DataFile objects from all workers and performs a single
         atomic commit based on the configured mode.
         """
+        # Reload table to get latest metadata. The spill paths need this too: their
+        # table was loaded in on_write_start, which for a long write can be hours
+        # stale, and they commit metadata derived from it.
+        self._reload_table()
+
         if self.collect_write_results_incrementally and self._used_spill_path:
             if self._mode == SaveMode.OVERWRITE:
                 self._commit_spilled_overwrite()
@@ -667,9 +672,6 @@ class IcebergDatasink(
             else:
                 self._commit_spilled()
             return
-
-        # Reload table to get latest metadata
-        self._reload_table()
 
         # Collect all data files and join keys (if applicable) from all workers
         all_data_files = []
@@ -848,6 +850,7 @@ class IcebergDatasink(
         from concurrent.futures import ThreadPoolExecutor
 
         from ray.data._internal.datasource.iceberg_manifest_commit import (
+            merge_summary_collectors,
             write_manifests_for_bin,
         )
 
@@ -866,14 +869,45 @@ class IcebergDatasink(
             )
 
         manifests = []
+        collectors = []
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
-            for result in executor.map(_write, enumerate(bins)):
-                manifests.extend(result)
+            for bin_manifests, bin_summary in executor.map(_write, enumerate(bins)):
+                manifests.extend(bin_manifests)
+                collectors.append(bin_summary)
 
         self._written_manifest_paths = [m.manifest_path for m in manifests]
-        return manifests
+        summary = merge_summary_collectors(collectors, table_metadata)
+        return manifests, summary
 
-    def _commit_spilled(self, stage_delete=None) -> None:
+    def _delete_written_manifests(self) -> None:
+        """Best-effort delete of the manifests written by the last commit attempt.
+
+        Only safe to call when no snapshot references them. Never raises.
+        """
+        io = getattr(self._table, "io", None) if self._table is not None else None
+        if io is not None:
+            for path in self._written_manifest_paths:
+                try:
+                    io.delete(path)
+                except Exception:
+                    logger.debug(
+                        "[spill commit] orphan manifest delete failed: %s", path
+                    )
+        self._written_manifest_paths = []
+
+    def _reload_for_commit_retry(self) -> None:
+        """Reload hook for the spill-commit retry.
+
+        The failed attempt's manifests are referenced by no snapshot, and the next
+        attempt writes a fresh set under a new commit UUID, so drop them now instead
+        of leaking one full set of manifests per lost race.
+        """
+        self._delete_written_manifests()
+        self._reload_table()
+
+    def _commit_spilled(
+        self, stage_delete=None, description: str = "spill append"
+    ) -> None:
         import time
 
         from ray.data._internal.datasource.iceberg_manifest_commit import (
@@ -881,6 +915,8 @@ class IcebergDatasink(
         )
 
         t_start = time.perf_counter()
+        # Closed once, outside the retry: the spill files stay on disk and are
+        # re-read by each attempt, so a retry re-writes manifests but never data.
         bins = self._spiller.close()
         logger.info(
             "[spill commit] %d data files across %d bin(s)",
@@ -888,13 +924,17 @@ class IcebergDatasink(
             len(bins),
         )
         branch = self._overwrite_kwargs.get("branch", "main")
-        try:
+
+        def _build_and_commit() -> None:
+            # Snapshot id and commit UUID are per-attempt: the id must descend from
+            # the currently loaded snapshot, and a fresh UUID keeps this attempt's
+            # manifest paths distinct from the discarded ones.
             self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
             self._commit_uuid = uuid.uuid4()
             txn = self._table.transaction()
             if stage_delete is not None:
                 stage_delete(txn)
-            manifests = self._write_manifests_parallel(
+            manifests, summary = self._write_manifests_parallel(
                 bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
             )
             apply_appended_manifests(
@@ -906,8 +946,14 @@ class IcebergDatasink(
                 self._snapshot_properties,
                 branch,
                 self._commit_uuid,
+                summary,
             )
             txn.commit_transaction()
+
+        try:
+            _run_commit_with_conflict_retry(
+                _build_and_commit, self._reload_for_commit_retry, description
+            )
             logger.info(
                 "[spill commit] committed in %.2fs", time.perf_counter() - t_start
             )
@@ -938,7 +984,9 @@ class IcebergDatasink(
         )
 
     def _commit_spilled_overwrite(self) -> None:
-        self._commit_spilled(stage_delete=self._stage_overwrite_delete)
+        self._commit_spilled(
+            stage_delete=self._stage_overwrite_delete, description="spill overwrite"
+        )
 
     def _commit_spilled_dynamic_overwrite(self) -> None:
         import time
@@ -948,9 +996,15 @@ class IcebergDatasink(
         )
 
         t_start = time.perf_counter()
+        # Closed once, outside the retry (see _commit_spilled).
         bins = self._spiller.close()
         branch = self._overwrite_kwargs.get("branch", "main")
-        try:
+
+        def _build_and_commit() -> None:
+            # The delete side is re-planned on every attempt: a writer that won the
+            # race may have added files to (or evolved the spec of) the partitions
+            # being replaced, and DataFiles planned against the old snapshot would
+            # both miss those files and re-delete ones already gone.
             positions = self._identity_positions()
             delete_filter = self._identity_filter_from_keys(
                 self._dynamic_partition_keys, positions
@@ -976,7 +1030,7 @@ class IcebergDatasink(
             self._commit_snapshot_id = self._table.metadata.new_snapshot_id()
             self._commit_uuid = uuid.uuid4()
             txn = self._table.transaction()
-            manifests = self._write_manifests_parallel(
+            manifests, summary = self._write_manifests_parallel(
                 bins, self._commit_snapshot_id, self._commit_uuid, txn.table_metadata
             )
             apply_overwrite_manifests(
@@ -988,8 +1042,17 @@ class IcebergDatasink(
                 self._snapshot_properties,
                 branch,
                 self._commit_uuid,
+                summary,
+                delete_filter,
             )
             txn.commit_transaction()
+
+        try:
+            _run_commit_with_conflict_retry(
+                _build_and_commit,
+                self._reload_for_commit_retry,
+                "spill dynamic overwrite",
+            )
             logger.info(
                 "[spill commit] dynamic overwrite committed in %.2fs",
                 time.perf_counter() - t_start,
@@ -1011,16 +1074,7 @@ class IcebergDatasink(
                 self._spiller.cleanup()
             except Exception:
                 logger.debug("[spill commit] spiller cleanup failed", exc_info=True)
-        io = getattr(self._table, "io", None) if self._table is not None else None
-        for path in self._written_manifest_paths:
-            if io is None:
-                break
-            try:
-                io.delete(path)
-            except Exception:
-                logger.debug(
-                    "[spill commit] orphan manifest delete failed: %s", path
-                )
+        self._delete_written_manifests()
         if self._spill_dir:
             try:
                 os.rmdir(self._spill_dir)

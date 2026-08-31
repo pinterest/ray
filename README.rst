@@ -1,3 +1,15 @@
+.. note::
+
+   **This repository is no longer where Pinterest's Ray fork is developed.**
+
+   Development, code review, and wheel releases have moved to Pinterest's
+   internal GitHub. Pull requests and branch pushes here will not be picked up.
+
+   This repository is kept for reference, and as the staging point for
+   contributions back to `ray-project/ray <https://github.com/ray-project/ray>`_.
+
+   Pinterest engineers: search pdocs for *Develop Ray (Pinterest Internal Fork)*.
+
 .. image:: https://github.com/ray-project/ray/raw/master/doc/source/images/ray_header_logo.png
 
 .. image:: https://readthedocs.org/projects/ray/badge/?version=master

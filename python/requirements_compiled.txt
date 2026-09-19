@@ -93,7 +93,7 @@ annotated-types==0.7.0
     # via pydantic
 antlr4-python3-runtime==4.13.2
     # via moto
-anyio==4.13.0
+anyio==4.14.2
     # via
     #   -r python/requirements/serve/serve-test-requirements.txt
     #   gradio

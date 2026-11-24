@@ -42,7 +42,7 @@ mypy==1.7.0
 pyright==1.1.408
 numba==0.61.2
 openpyxl==3.0.10
-opentelemetry-api==1.39.0
+opentelemetry-api==1.45.2
 opentelemetry-sdk==1.39.0
 # proto and exporter-otlp-proto-grpc must match sdk/proto version or vllm
 # (rayllm depset) can't satisfy opentelemetry-exporter-otlp's in-family pins.

@@ -1386,7 +1386,7 @@ openlineage-python==1.46.0
     # via -r python/requirements/cloud-requirements.txt
 openpyxl==3.0.10
     # via -r python/requirements/py313/test-requirements.txt
-opentelemetry-api==1.39.0
+opentelemetry-api==1.45.2
     # via
     #   -r python/requirements.txt
     #   -r python/requirements/py313/test-requirements.txt
